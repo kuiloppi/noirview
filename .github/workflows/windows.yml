@@ -1,0 +1,63 @@
+name: Windows build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      - name: USN service install, probe and removal
+        shell: pwsh
+        run: |
+          cargo build --release --locked --bin noirview-usn
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $exe = "target/release/noirview-usn.exe"
+          $log = Join-Path $env:ProgramData "NoirView/usn.log"
+          & $exe --install --user $sid
+          if ($LASTEXITCODE -ne 0) { Get-Content $log -ErrorAction SilentlyContinue; throw "install failed" }
+          Get-Service NoirViewUsn | Format-List Name,Status,StartType
+          sc.exe qc NoirViewUsn
+          sc.exe qprivs NoirViewUsn
+          $ok = $false
+          for ($i = 0; $i -lt 30 -and -not $ok; $i++) {
+            & $exe --probe C:
+            if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Milliseconds 500 }
+          }
+          Get-Content $log -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "probe failed" }
+          cargo test --locked --test background_watcher -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { Get-Content $log -ErrorAction SilentlyContinue; & $exe --uninstall; throw "journal watcher test failed" }
+          & $exe --uninstall
+          if ($LASTEXITCODE -ne 0) { Get-Content $log; throw "uninstall failed" }
+          if (Get-Service NoirViewUsn -ErrorAction SilentlyContinue) { throw "service still present" }
+          if (Test-Path (Join-Path $env:ProgramFiles "NoirView/noirview-usn.exe")) { throw "copy still present" }
+      - name: Thumbnail benchmark (decode and resize)
+        run: cargo test --release --locked bench_thumbnails -- --ignored --nocapture
+      - name: PNG and full-view benchmark (0.1.30 steps against current)
+        run: cargo test --release --locked bench_png -- --ignored --nocapture
+      - name: First-view load benchmark
+        run: cargo test --release --locked bench_first_view -- --ignored --nocapture
+      - name: Portable package
+        shell: pwsh
+        run: ./build-windows.ps1 -SkipChecks -IncludeAiRuntime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NoirView-windows-x64
+          path: dist/NoirView-0.1.62-windows-x64.zip

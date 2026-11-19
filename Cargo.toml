@@ -1,0 +1,68 @@
+[package]
+name = "noirview"
+version = "0.1.62"
+edition = "2021"
+rust-version = "1.89"
+description = "A quiet, GPU-rendered image viewer for Windows"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+crc32fast = "1"
+fs2 = "0.4"
+crossbeam-channel = "0.5"
+notify = "8.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+directories = "6"
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "wgpu", "glow", "x11", "wayland", "persistence"] }
+# "glow": OpenGL as an alternative renderer (Settings → Display → Graphics
+# backend); it presents frames without DXGI's flip model.
+# egui-wgpu takes wgpu without its default backends; this adds DirectX 12 on
+# Windows (Settings → Display → Graphics backend).
+wgpu = { version = "24.0.5", default-features = false, features = ["dx12"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"] }
+rand = "0.8"
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "symphonia-wav", "symphonia-flac", "symphonia-vorbis"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+trash = "5"
+walkdir = "2"
+xmltree = "0.11"
+quick-xml = "0.41"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "load-dynamic", "ndarray"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+md5 = "0.8"
+fast_image_resize = "6.1.0"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["directml"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Ioctl", "Win32_System_IO", "Win32_System_Pipes", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Services", "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Memory"] }
+windows-service = "0.8.1"
+
+# Image codecs and the resizer are far too slow unoptimized: tests that decode
+# or encode real image sizes would saturate a CI machine and push unrelated
+# timing tests past their limits. Dependencies are optimized in dev/test too, and this crate lightly (generic
+# pixel loops are instantiated here); debug assertions stay on.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+jpeg-encoder = "0.7.1"
+
+# eframe with one patch (vendor/eframe/NOIRVIEW_PATCH.md): the window's
+# surface follows the window's size before every frame (Windows).
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }
