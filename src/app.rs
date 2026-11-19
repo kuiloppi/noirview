@@ -168,6 +168,13 @@ fn first_view_name(side: usize) -> &'static str {
         "Preview"
     }
 }
+/// Clears the open-dialog flag when the dialog thread ends (also on panic).
+struct PickDone(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for PickDone {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 /// The small window above a held button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Popup {
@@ -1264,6 +1271,8 @@ pub struct Viewer {
     /// Settings → Library → Favorite folders: the entry whose folder is
     /// being chosen again (None: a new one).
     favorite_pick: Option<usize>,
+    /// A file or folder dialog is open (only one at a time).
+    picking: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Buttons being held (start, the long press already fired).
     holds: HashMap<&'static str, (Instant, bool)>,
     /// A small window above a held button: favorite folders or Go to.
@@ -1276,6 +1285,10 @@ pub struct Viewer {
     round_seen: HashSet<PathBuf>,
     round_last: Option<PathBuf>,
     round_order: Option<crate::model::Order>,
+    /// The round notice on screen (text, since).
+    round_message: Option<(String, Instant)>,
+    /// Settings: scroll to this section when the window next draws.
+    settings_scroll: Option<&'static str>,
     /// Where the pointer was when the hover preview opened.
     preview_origin: Option<(PathBuf, Pos2)>,
     /// The bar of the grid's controls drawn last (with its frame or margin):
@@ -1518,6 +1531,7 @@ impl Viewer {
             group_open: None,
             bar_buttons_tab: "toolbar",
             holds: HashMap::new(),
+            picking: std::sync::Arc::default(),
             favorite_pick: None,
             popup: None,
             goto_text: String::new(),
@@ -1526,6 +1540,8 @@ impl Viewer {
             round_last: None,
             round_order: None,
             preview_origin: None,
+            round_message: None,
+            settings_scroll: None,
             controls_rect: None,
             tags_anchor: None,
             copy_flash: None,
@@ -1707,9 +1723,15 @@ impl Viewer {
         self.tx.ctx.request_repaint();
     }
     fn pick(&self, kind: &str) {
+        // One file or folder dialog at a time.
+        if self.picking.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let picking = self.picking.clone();
         let tx = self.tx.clone();
         let kind = kind.to_string();
         std::thread::spawn(move || {
+            let _done = PickDone(picking);
             let dialog = rfd::FileDialog::new();
             let event = match kind.as_str() {
                 "open" => dialog
@@ -2392,6 +2414,9 @@ impl Viewer {
                     }
                     let paths: Vec<_> = report.moved.iter().map(|i| i.0.clone()).collect();
                     self.remove_from_view(&paths);
+                    // Moved images leave the page at once (no "deleted" tiles: the
+                    // folder watcher may already have dropped some of them).
+                    self.grid_ghosts = None;
                     self.notify(format!(
                         "Moved {} image(s); skipped {}",
                         paths.len(),
@@ -2752,7 +2777,11 @@ impl Viewer {
                     self.dialog = Some(Dialog::RoundDone(n));
                 }
             } else {
-                self.notify(format!("All {n} images shown: a new round begins"));
+                self.round_message = Some((
+                    format!("All {n} images shown: a new round begins"),
+                    Instant::now(),
+                ));
+                self.tx.ctx.request_repaint();
             }
         }
     }
@@ -2811,76 +2840,99 @@ impl Viewer {
             return;
         };
         let mut done = false;
+        // Above the bar the button is on, not over its frame.
+        let top = ["toolbar", "grid_icon_bar", "group_bar"]
+            .into_iter()
+            .filter_map(|id| ctx.memory(|m| m.area_rect(Id::new(id))))
+            .chain(ctx.memory(|m| m.area_rect(Id::new(("grid_overflow", true)))))
+            .chain(ctx.memory(|m| m.area_rect(Id::new(("grid_overflow", false)))))
+            .chain(self.controls_rect)
+            .filter(|r| r.contains(button.center()))
+            .map(|r| r.top())
+            .fold(button.top(), f32::min);
+        let anchor = Pos2::new(button.center().x, top);
+        // As wide as the longest entry.
+        let font = egui::TextStyle::Button.resolve(&ctx.style());
+        let widest = self
+            .lib
+            .settings
+            .favorite_folders
+            .iter()
+            .map(|f| f.label())
+            .chain([
+                "☆ Remove the open folder".into(),
+                "Manage in Settings…".into(),
+            ])
+            .map(|t| ctx.fonts(|f| f.layout_no_wrap(t, font.clone(), Color32::WHITE).size().x))
+            .fold(0., f32::max);
+        let width = (widest + 2. * ctx.style().spacing.button_padding.x + 4.).clamp(160., 420.);
         let rect = match popup {
-            Popup::Favorites => above(
-                ctx,
-                Id::new("favorite_folders"),
-                button.center_top(),
-                |ui| {
-                    ui.set_max_width(440.);
-                    ui.label(RichText::new("Favorite folders").strong());
-                    let open = self.folder.clone();
-                    let index = open.as_ref().and_then(|f| {
-                        self.lib
-                            .settings
-                            .favorite_folders
-                            .iter()
-                            .position(|x| x.path == *f)
-                    });
-                    match (&open, index) {
-                        (Some(_), Some(i)) => {
-                            if self
-                                .hover
-                                .button(ui, "☆ Remove the open folder", false, true, false)
-                            {
-                                self.lib.settings.favorite_folders.remove(i);
-                                self.changed();
-                                done = true;
-                            }
-                        }
-                        (Some(f), None) => {
-                            if self
-                                .hover
-                                .button(ui, "★ Add the open folder", false, true, false)
-                            {
-                                self.lib.settings.favorite_folders.push(
-                                    crate::model::FavoriteFolder {
-                                        name: String::new(),
-                                        path: f.clone(),
-                                    },
-                                );
-                                self.changed();
-                                done = true;
-                            }
-                        }
-                        (None, _) => {}
-                    }
-                    ui.separator();
-                    let favorites = self.lib.settings.favorite_folders.clone();
-                    if favorites.is_empty() {
-                        ui.label(RichText::new("No favorite folders yet.").color(MUTED));
-                    }
-                    for f in favorites {
-                        let here = open.as_ref() == Some(&f.path);
-                        let r = ui
-                            .add_enabled(!self.busy, egui::Button::new(f.label()).selected(here))
-                            .on_hover_text(f.path.display().to_string());
-                        if self.hover.watch(r, false).clicked() {
-                            self.open(f.path.clone());
+            Popup::Favorites => above(ctx, Id::new("favorite_folders"), anchor, |ui| {
+                ui.set_width(width);
+                ui.label(RichText::new("Favorite folders").strong());
+                let open = self.folder.clone();
+                let index = open.as_ref().and_then(|f| {
+                    self.lib
+                        .settings
+                        .favorite_folders
+                        .iter()
+                        .position(|x| x.path == *f)
+                });
+                match (&open, index) {
+                    (Some(_), Some(i)) => {
+                        if self
+                            .hover
+                            .button(ui, "☆ Remove the open folder", false, true, false)
+                        {
+                            self.lib.settings.favorite_folders.remove(i);
+                            self.changed();
                             done = true;
                         }
                     }
-                    ui.separator();
-                    if self
-                        .hover
-                        .button(ui, "Manage in Settings…", false, true, false)
-                    {
-                        self.settings = true;
-                        self.settings_tab = 2;
+                    (Some(f), None) => {
+                        if self
+                            .hover
+                            .button(ui, "★ Add the open folder", false, true, false)
+                        {
+                            self.lib
+                                .settings
+                                .favorite_folders
+                                .push(crate::model::FavoriteFolder {
+                                    name: String::new(),
+                                    path: f.clone(),
+                                });
+                            self.changed();
+                            done = true;
+                        }
+                    }
+                    (None, _) => {}
+                }
+                ui.separator();
+                let favorites = self.lib.settings.favorite_folders.clone();
+                if favorites.is_empty() {
+                    ui.label(RichText::new("No favorite folders yet.").color(MUTED));
+                }
+                for f in favorites {
+                    let here = open.as_ref() == Some(&f.path);
+                    let r = ui
+                        .add_enabled(!self.busy, egui::Button::new(f.label()).selected(here))
+                        .on_hover_text(f.path.display().to_string());
+                    if self.hover.watch(r, false).clicked() {
+                        self.open(f.path.clone());
                         done = true;
                     }
-                },
-            ),
+                }
+                ui.separator();
+                if self
+                    .hover
+                    .button(ui, "Manage in Settings…", false, true, false)
+                {
+                    self.settings = true;
+                    self.settings_tab = 2;
+                    self.settings_scroll = Some("favorites");
+                    done = true;
+                }
+            }),
             Popup::GoTo => {
                 let in_grid = self.grid && self.grid_viewer.is_none();
                 let total = if in_grid {
@@ -2889,7 +2941,7 @@ impl Viewer {
                     self.visible.len()
                 };
                 let mut go = None;
-                let rect = above(ctx, Id::new("go_to"), button.center_top(), |ui| {
+                let rect = above(ctx, Id::new("go_to"), anchor, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(if in_grid { "Go to page" } else { "Go to image" });
                         let edit = ui.add(
@@ -3305,17 +3357,29 @@ impl Viewer {
                 .to_string_lossy()
                 .into_owned()
         };
+        let forward = self.lib.settings.path_forward_slashes;
+        let folder = |p: &Path| {
+            p.parent().map(|dir| {
+                let text = format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR);
+                if forward {
+                    text.replace('\\', "/")
+                } else {
+                    text
+                }
+            })
+        };
         if !grid_tiles {
-            return self.current.as_deref().map(name);
+            let p = self.current.as_deref()?;
+            let dir = folder(p).filter(|_| self.lib.settings.image_title_folder);
+            return Some(dir.unwrap_or_default() + &name(p));
         }
         let (page, _) = self.page_paths();
         let first = page.first()?;
         let s = &self.lib.settings;
         let mut title = String::new();
         if s.grid_caption_folder {
-            if let Some(dir) = first.parent() {
-                title.push_str(&dir.display().to_string());
-                title.push(std::path::MAIN_SEPARATOR);
+            if let Some(dir) = folder(first) {
+                title.push_str(&dir);
             }
         }
         title.push_str(&name(first));
@@ -4017,6 +4081,43 @@ impl Viewer {
                 ctx.request_repaint_after(left.min(Duration::from_millis(100)));
             }
         }
+    }
+    /// The round notice: size, colour and place from Settings → Interaction.
+    fn draw_round_message(&mut self, ctx: &egui::Context) {
+        let Some((message, started)) = self.round_message.clone() else {
+            return;
+        };
+        let left = crate::repaint::TOAST_LIFETIME.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            self.round_message = None;
+            return;
+        }
+        if self.image_only() {
+            return;
+        }
+        let s = &self.lib.settings;
+        let (align, offset) = match s.round_notice_place.as_str() {
+            "top" => (egui::Align2::CENTER_TOP, Vec2::new(0., 65.)),
+            "bottom" => (egui::Align2::CENTER_BOTTOM, Vec2::new(0., -110.)),
+            _ => (egui::Align2::CENTER_CENTER, Vec2::ZERO),
+        };
+        let c = s.round_notice_color;
+        let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+        let size = s.round_notice_size.clamp(10., 120.);
+        egui::Area::new(Id::new("round_message"))
+            .anchor(align, offset)
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .corner_radius(14.)
+                    .inner_margin(size * 0.5)
+                    .show(ui, |ui| {
+                        ui.set_max_width(ctx.screen_rect().width() - 80.);
+                        ui.label(RichText::new(message).size(size).color(color));
+                    });
+            });
+        ctx.request_repaint_after(left.min(Duration::from_millis(250)));
     }
     fn initial_grid_normal(&self) -> bool {
         match self.lib.settings.grid_start_mode {
@@ -4916,10 +5017,17 @@ impl Viewer {
                 if self.preview_origin.as_ref().is_none_or(|(o, _)| *o != path) {
                     self.preview_origin = Some((path.clone(), p));
                 }
-                let moved = self
-                    .preview_origin
-                    .as_ref()
-                    .is_some_and(|(_, at)| at.distance(p) > s.preview_close_move_px);
+                let moved = self.preview_origin.as_ref().is_some_and(|(_, at)| {
+                    let d = p - *at;
+                    let travelled = match s.preview_close_move_dir.as_str() {
+                        "up" => -d.y,
+                        "down" => d.y,
+                        "left" => -d.x,
+                        "right" => d.x,
+                        _ => d.length(),
+                    };
+                    travelled > s.preview_close_move_px
+                });
                 if moved {
                     self.preview = None;
                     self.preview_close = None;
@@ -5043,7 +5151,13 @@ impl Viewer {
                 .step(next || self.lib.settings.grid_random_both);
             return;
         }
-        if let Some(g) = self.grid_ghosts.take() {
+        // Only the page still shown: ghosts of a page left meanwhile (Go to,
+        // a jump) would turn from the wrong place.
+        if let Some(g) = self
+            .grid_ghosts
+            .take()
+            .filter(|g| g.start == self.grid_start)
+        {
             // Images after a deleted one moved up into this page: the next page
             // starts where the shown (pre-deletion) page really ended.
             self.grid_start = if next {
@@ -7683,6 +7797,30 @@ impl Viewer {
                         }
                     });
                 });
+                ui.add_enabled_ui(s.round_notice && !s.round_notice_dialog, |ui| {
+                    h.slider(
+                        ui,
+                        &mut s.round_notice_size,
+                        10.0..=120.0,
+                        "Notice text size",
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Notice place");
+                        for (value, label) in
+                            [("top", "Top"), ("center", "Centre"), ("bottom", "Bottom")]
+                        {
+                            if h.button(ui, label, s.round_notice_place == value, true, false) {
+                                s.round_notice_place = value.to_owned();
+                            }
+                        }
+                        ui.label("Colour");
+                        let c = s.round_notice_color;
+                        let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            s.round_notice_color = color.to_srgba_unmultiplied();
+                        }
+                    });
+                });
                 ui.label(RichText::new("In the image view: once every image of the list has been shown, a new round begins. The toolbar's round button (in the group by default) turns this on and off.").color(MUTED));
                 h.check(ui, &mut s.wheel_up_next, "Scroll up for next image");
                 h.check(
@@ -7751,6 +7889,9 @@ impl Viewer {
                 ui.label("During a slideshow the top edge pauses / resumes; it never deletes.");
             }
             2 => {
+                if self.settings_scroll.take() == Some("favorites") {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                }
                 ui.heading("Favorite folders");
                 ui.label(RichText::new("Hold Open folder (toolbar or grid) to open one of these; the list can also add or remove the open folder.").color(MUTED));
                 let mut remove = None;
@@ -8186,6 +8327,22 @@ impl Viewer {
                     0.0..=1000.0,
                     "Close the preview when the pointer moves this far (px, 0 = off)",
                 );
+                ui.add_enabled_ui(s.preview_close_move_px > 0., |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("In this direction");
+                        for (value, label) in [
+                            ("any", "Any"),
+                            ("up", "Up"),
+                            ("down", "Down"),
+                            ("left", "Left"),
+                            ("right", "Right"),
+                        ] {
+                            if h.button(ui, label, s.preview_close_move_dir == value, true, false) {
+                                s.preview_close_move_dir = value.to_owned();
+                            }
+                        }
+                    });
+                });
                 ui.label("The preview also closes with the gesture and with Escape.");
                 h.check(
                     ui,
@@ -8264,6 +8421,16 @@ impl Viewer {
                     ui,
                     &mut s.grid_caption_count,
                     "Grid page title: the number of images at the end",
+                );
+                h.check(
+                    ui,
+                    &mut s.image_title_folder,
+                    "Image view title: the folder before the image name",
+                );
+                h.check(
+                    ui,
+                    &mut s.path_forward_slashes,
+                    "Show folder paths with forward slashes (D:/Photos)",
                 );
                 ui.label("Image loading");
                 ui.horizontal_wrapped(|ui| {
@@ -8822,16 +8989,21 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                 } else {
                     "Move all folder images?".to_owned()
                 });
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     let dest = self.lib.settings.destination.clone();
-                    ui.label(format!(
+                    let text = format!(
                         "Destination: {}",
                         if dest.as_os_str().is_empty() {
                             "(none)".to_owned()
                         } else {
                             dest.display().to_string()
                         }
-                    ));
+                    );
+                    // Long paths end in "…" instead of widening the dialog.
+                    ui.allocate_ui(Vec2::new(430., 20.), |ui| {
+                        ui.add(egui::Label::new(text).truncate())
+                            .on_hover_text(dest.display().to_string());
+                    });
                     if self.hover.button(ui, "Browse…", false, !self.busy, false) {
                         self.pick("destination");
                     }
@@ -8848,7 +9020,11 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                         ui.label(format!("{} image(s)", items.len()));
                         if let (Some(first), Some(last)) = (items.first(), items.last()) {
                             let name = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                            ui.label(format!("{} — {}", name(&first.target), name(&last.target)));
+                            // Long original names end in "…" instead of widening the dialog.
+                            let line = format!("{} — {}", name(&first.target), name(&last.target));
+                            ui.allocate_ui(Vec2::new(520., 20.), |ui| {
+                                ui.add(egui::Label::new(line.clone()).truncate()).on_hover_text(line);
+                            });
                         }
                     }
                     Err(e) => {
@@ -10075,6 +10251,7 @@ impl eframe::App for Viewer {
             self.toast = None;
         }
         self.draw_big_toast(ctx);
+        self.draw_round_message(ctx);
         if let Some((message, _)) = self.toast.as_ref().filter(|_| !self.image_only()) {
             egui::Area::new(Id::new("toast"))
                 .anchor(egui::Align2::CENTER_TOP, Vec2::new(0., 65.))
@@ -10852,16 +11029,19 @@ mod tests {
             v.count_round(p);
         }
         v.count_round(&files[1]);
-        assert!(v.toast.is_none(), "two of three, the same image twice");
+        assert!(
+            v.round_message.is_none(),
+            "two of three, the same image twice"
+        );
         v.count_round(&files[2]);
         assert!(v
-            .toast
+            .round_message
             .as_ref()
             .is_some_and(|(t, _)| t.starts_with("All 3 images")));
         // A new round has begun with the image shown.
         assert_eq!(v.round_seen.len(), 1);
         // As a dialog; Random never counts; off never tells.
-        v.toast = None;
+        v.round_message = None;
         v.lib.settings.round_notice_dialog = true;
         v.count_round(&files[0]);
         v.count_round(&files[1]);
@@ -10908,6 +11088,54 @@ mod tests {
         assert_eq!(v.grid_start, 0);
         v.grid_page(false);
         assert_eq!(v.grid_start, last, "back from the first to the last");
+    }
+    #[test]
+    fn paging_back_after_a_jump_ignores_the_page_frozen_before_it() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 250);
+        v.grid = true;
+        v.lib.settings.grid_round_full = false;
+        v.lib.settings.thumbnail_count = 12;
+        let count = v.grid_count();
+        // A deletion froze page 1; the view then moved to page 7 another way.
+        v.freeze_grid_page(&[v.files[0].clone()]);
+        assert!(v.grid_ghosts.is_some());
+        v.grid_start = 6 * count;
+        v.grid_page(false);
+        assert_eq!(
+            v.grid_start,
+            5 * count,
+            "page 6, not from the frozen page 1"
+        );
+    }
+    #[test]
+    fn moved_images_leave_the_grid_page_without_deleted_tiles() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 30);
+        v.grid = true;
+        v.lib.settings.grid_round_full = false;
+        v.lib.settings.thumbnail_count = 12;
+        let moved: Vec<_> = v.files[3..6]
+            .iter()
+            .map(|p| (p.clone(), p.with_extension("moved")))
+            .collect();
+        v.tx.send(Event::Moved(crate::operations::MoveReport {
+            moved,
+            ..Default::default()
+        }))
+        .unwrap();
+        v.poll(&ctx);
+        assert!(v.grid_ghosts.is_none());
+    }
+    #[test]
+    fn the_image_title_can_show_the_folder_with_forward_slashes() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        assert_eq!(v.top_title(false).as_deref(), Some("00.jpg"));
+        v.lib.settings.image_title_folder = true;
+        v.lib.settings.path_forward_slashes = true;
+        // "/p" + the platform's separator, then turned to "/".
+        assert_eq!(v.top_title(false).as_deref(), Some("/p/00.jpg"));
     }
     #[test]
     fn the_big_image_from_the_grid_can_be_browsed_when_chosen() {

@@ -382,6 +382,19 @@ pub struct Settings {
     /// the list has been shown (a notice, or a dialog).
     pub round_notice: bool,
     pub round_notice_dialog: bool,
+    /// The round notice: text size, colour and place ("top", "center",
+    /// "bottom").
+    pub round_notice_size: f32,
+    pub round_notice_color: [u8; 4],
+    pub round_notice_place: String,
+    /// Which way the pointer must move to close the hover preview: "any",
+    /// "up", "down", "left" or "right".
+    pub preview_close_move_dir: String,
+    /// Folder paths shown with forward slashes (D:/Photos) instead of
+    /// backslashes.
+    pub path_forward_slashes: bool,
+    /// The image view's title shows the folder before the image name.
+    pub image_title_folder: bool,
     /// Grid pages wrap around: before the first page comes the last one and
     /// after the last the first (In order pages).
     pub grid_page_wrap: bool,
@@ -549,6 +562,12 @@ impl Default for Settings {
             favorite_folders: vec![],
             round_notice: true,
             round_notice_dialog: false,
+            round_notice_size: 28.,
+            round_notice_color: [235, 240, 236, 255],
+            round_notice_place: "center".into(),
+            preview_close_move_dir: "any".into(),
+            path_forward_slashes: false,
+            image_title_folder: false,
             grid_page_wrap: false,
             preview_close_move_px: 0.,
             grid_viewer_browse: false,

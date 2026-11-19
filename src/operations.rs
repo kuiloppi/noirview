@@ -422,6 +422,131 @@ pub fn recycle(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
 /// (Unix seconds, a few seconds' slack) or later. Returns the restored
 /// images and an error line per image that could not be restored.
 pub fn restore_deleted(paths: &[PathBuf], since: i64) -> (Vec<PathBuf>, Vec<String>) {
+    // On Windows first straight from the drive's Recycle Bin folder: listing
+    // the whole Recycle Bin through the shell (below) can take minutes.
+    #[cfg(windows)]
+    let (mut fast, paths) = {
+        let (done, rest) = restore_from_bins(&recycle_bin_folders(paths), paths, since);
+        (done, rest)
+    };
+    #[cfg(not(windows))]
+    let mut fast: Vec<PathBuf> = vec![];
+    #[cfg(windows)]
+    let paths = &paths[..];
+    if paths.is_empty() {
+        return (fast, vec![]);
+    }
+    let (done, errors) = restore_through_trash(paths, since);
+    fast.extend(done);
+    (fast, errors)
+}
+/// The original path and deletion time (Unix seconds) in a Windows Recycle
+/// Bin `$I` file (format 1: Vista / 7, 2: Windows 8 and later).
+#[cfg(any(windows, test))]
+fn recycle_info(bytes: &[u8]) -> Option<(PathBuf, i64)> {
+    let u64_at = |at: usize| Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?));
+    let version = u64_at(0)?;
+    let filetime = u64_at(16)?;
+    let wide: Vec<u16> = match version {
+        1 => bytes.get(24..24 + 520)?,
+        2 => {
+            let chars = u32::from_le_bytes(bytes.get(24..28)?.try_into().ok()?) as usize;
+            bytes.get(28..28 + chars.checked_mul(2)?)?
+        }
+        _ => return None,
+    }
+    .chunks_exact(2)
+    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+    .take_while(|c| *c != 0)
+    .collect();
+    let path = String::from_utf16(&wide).ok()?;
+    // Windows FILETIME: 100 ns steps since 1601.
+    let unix = (filetime as i64 - 116_444_736_000_000_000) / 10_000_000;
+    (!path.is_empty()).then(|| (PathBuf::from(path), unix))
+}
+/// Moves back the newest `$R` file of each path (and its sidecar) deleted at
+/// `since` or later, from these Recycle Bin folders, removing its `$I` record.
+/// Returns the images restored and those not found there (for the slower way).
+#[cfg(any(windows, test))]
+fn restore_from_bins(
+    bins: &[PathBuf],
+    paths: &[PathBuf],
+    since: i64,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut records = vec![];
+    for bin in bins {
+        let Ok(entries) = fs::read_dir(bin) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix("$I") else {
+                continue;
+            };
+            let Some((original, at)) = fs::read(e.path()).ok().and_then(|b| recycle_info(&b))
+            else {
+                continue;
+            };
+            if at >= since - 5 {
+                records.push((original, at, e.path(), bin.join(format!("$R{rest}"))));
+            }
+        }
+    }
+    let newest = |wanted: &Path| {
+        records
+            .iter()
+            .filter(|(original, _, _, data)| same_path(original, wanted) && data.exists())
+            .max_by_key(|(_, at, _, _)| *at)
+    };
+    let mut done = vec![];
+    let mut rest = vec![];
+    for p in paths {
+        let Some((_, _, info, data)) = newest(p).filter(|_| !p.exists()) else {
+            rest.push(p.clone());
+            continue;
+        };
+        if fs::rename(data, p).is_err() {
+            rest.push(p.clone());
+            continue;
+        }
+        let _ = fs::remove_file(info);
+        let side = crate::metadata::sidecar(p);
+        if let Some((_, _, info, data)) = newest(&side).filter(|_| !side.exists()) {
+            if fs::rename(data, &side).is_ok() {
+                let _ = fs::remove_file(info);
+            }
+        }
+        done.push(p.clone());
+    }
+    (done, rest)
+}
+/// The Recycle Bin folders (one per user) on the drives of `paths`.
+#[cfg(windows)]
+fn recycle_bin_folders(paths: &[PathBuf]) -> Vec<PathBuf> {
+    use std::path::Component;
+    let mut roots: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|p| match p.components().next() {
+            Some(Component::Prefix(prefix)) => {
+                // "D:" + "\" (join would replace the path with the root).
+                let mut root = prefix.as_os_str().to_os_string();
+                root.push("\\");
+                Some(PathBuf::from(root))
+            }
+            _ => None,
+        })
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root.join("$Recycle.Bin")).ok())
+        .flat_map(|dirs| dirs.flatten().map(|d| d.path()))
+        .filter(|d| d.is_dir())
+        .collect()
+}
+/// Restores through the trash crate (the shell's view of the Recycle Bin).
+fn restore_through_trash(paths: &[PathBuf], since: i64) -> (Vec<PathBuf>, Vec<String>) {
     #[cfg(any(windows, all(unix, not(target_os = "macos"))))]
     {
         let items = match trash::os_limited::list() {
@@ -557,6 +682,85 @@ mod tests {
             next_name(&dst.join("005.jpg")).unwrap(),
             dst.join("006.jpg")
         );
+    }
+    fn info_v2(path: &str, unix: i64) -> Vec<u8> {
+        let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        let mut b = vec![];
+        b.extend(2u64.to_le_bytes());
+        b.extend(1234u64.to_le_bytes());
+        b.extend(((unix * 10_000_000 + 116_444_736_000_000_000) as u64).to_le_bytes());
+        b.extend((wide.len() as u32).to_le_bytes());
+        for c in wide {
+            b.extend(c.to_le_bytes());
+        }
+        b
+    }
+    #[test]
+    fn recycle_bin_records_are_read_in_both_formats() {
+        assert_eq!(
+            recycle_info(&info_v2(r"D:\Photos\a.jpg", 1_700_000_000)),
+            Some((PathBuf::from(r"D:\Photos\a.jpg"), 1_700_000_000))
+        );
+        let mut v1 = vec![];
+        v1.extend(1u64.to_le_bytes());
+        v1.extend(5u64.to_le_bytes());
+        v1.extend(((1_600_000_000i64 * 10_000_000 + 116_444_736_000_000_000) as u64).to_le_bytes());
+        let mut path: Vec<u8> = "C:\\x.png"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        path.resize(520, 0);
+        v1.extend(path);
+        assert_eq!(
+            recycle_info(&v1),
+            Some((PathBuf::from("C:\\x.png"), 1_600_000_000))
+        );
+        assert_eq!(recycle_info(&[0; 10]), None);
+        assert_eq!(recycle_info(&info_v2("", 1)), None);
+    }
+    #[test]
+    fn images_come_back_from_a_recycle_bin_folder_with_their_sidecars() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("bin");
+        let photos = d.path().join("photos");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&photos).unwrap();
+        let a = photos.join("a.jpg");
+        let side = crate::metadata::sidecar(&a);
+        let b = photos.join("b.jpg");
+        let record = |id: &str, original: &Path, at: i64, data: &[u8]| {
+            fs::write(
+                bin.join(format!("$I{id}")),
+                info_v2(&original.to_string_lossy(), at),
+            )
+            .unwrap();
+            fs::write(bin.join(format!("$R{id}")), data).unwrap();
+        };
+        record("OLD.jpg", &a, 100, b"old");
+        record("NEW.jpg", &a, 1000, b"new");
+        record("SIDE.xmp", &side, 1000, b"xmp");
+        record("B.jpg", &b, 50, b"b");
+        let (done, rest) =
+            restore_from_bins(std::slice::from_ref(&bin), &[a.clone(), b.clone()], 990);
+        assert_eq!(done, std::slice::from_ref(&a));
+        assert_eq!(
+            rest,
+            std::slice::from_ref(&b),
+            "deleted before the deletion: left for the slow way"
+        );
+        assert_eq!(fs::read(&a).unwrap(), b"new", "the newest copy");
+        assert_eq!(fs::read(&side).unwrap(), b"xmp", "with its sidecar");
+        assert!(!bin.join("$INEW.jpg").exists() && !bin.join("$RNEW.jpg").exists());
+        assert!(
+            bin.join("$IOLD.jpg").exists(),
+            "older copies stay in the bin"
+        );
+        // A file of that name exists: not overwritten.
+        record("NEWER.jpg", &a, 2000, b"newer");
+        let (done, rest) =
+            restore_from_bins(std::slice::from_ref(&bin), std::slice::from_ref(&a), 990);
+        assert!(done.is_empty() && rest == [a.clone()]);
+        assert_eq!(fs::read(&a).unwrap(), b"new");
     }
     #[test]
     fn restoring_picks_the_newest_trashed_copy_since_the_deletion() {

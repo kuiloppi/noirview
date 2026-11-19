@@ -1,5 +1,8 @@
 # NoirView
 
+> **⚠ Early development — use at your own risk.**
+> NoirView is a work in progress. It writes keywords into image files, moves, renames and deletes files, and can run an optional background service for folder watching. A bug could damage, corrupt or lose images, or have other unexpected effects on your system. Keep backups of your images before using it, try it first on copies, and do not rely on it for files you cannot replace. The software is provided "as is", without warranty of any kind (see `LICENSE`).
+
 A quiet, dark image viewer for Windows 10/11 (64-bit), written in Rust with egui/eframe. Images are decoded, scaled and cached off the UI thread; the window shows only the image until you ask for more.
 
 ## Features
