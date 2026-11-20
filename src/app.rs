@@ -58,6 +58,8 @@ enum Event {
     ThumbnailCacheDir(PathBuf),
     /// A folder chosen for the favorite folders (new, or replacing one).
     FavoriteFolder(PathBuf),
+    /// Where a kind of file dialog was when it closed.
+    DialogPlace(String, [i32; 2]),
     WatchFolder(PathBuf),
     /// USN service state and its version (if it answered).
     UsnStatus(crate::usn::State, Option<String>),
@@ -211,6 +213,8 @@ enum Dialog {
     RestoreDeleted(Vec<PathBuf>),
     /// Every image of the list has been shown (round notice).
     RoundDone(usize),
+    /// Delete this profile?
+    DeleteProfile(String),
     Move(MovePlan),
     Conflict(Vec<MoveItem>),
     Restore(PathBuf),
@@ -652,20 +656,17 @@ fn title_line(ui: &mut egui::Ui, title: Option<String>, width: f32, raise: f32) 
         job.wrap.break_anywhere = true;
         ui.fonts(|f| f.layout_job(job))
     });
-    // The title's top relative to the head's top.
+    // The title's top relative to the head's top. Only NOIRVIEW and "/"
+    // take room in the row, so raising the title never moves them.
     let tail_top = tail
         .as_ref()
         .map_or(0., |t| baseline(&head) - baseline(t) - raise);
-    let top = tail_top.min(0.);
-    let bottom = tail
-        .as_ref()
-        .map_or(head.size().y, |t| head.size().y.max(tail_top + t.size().y));
     let tail_width = tail.as_ref().map_or(0., |t| 8. + t.size().x);
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(head.size().x + tail_width, bottom - top),
+        Vec2::new(head.size().x + tail_width, head.size().y),
         Sense::hover(),
     );
-    let origin = rect.min - Vec2::new(0., top);
+    let origin = rect.min;
     if let (Some(t), Some(title)) = (&tail, &title) {
         if t.elided {
             response.on_hover_text(title.clone());
@@ -1453,6 +1454,10 @@ pub struct Viewer {
     backend_checked: bool,
     /// The settings as they were when the Settings window opened (Cancel).
     settings_snapshot: Option<Box<Settings>>,
+    /// A profile to switch to (Settings or the right-click menu).
+    pending_profile: Option<String>,
+    /// Naming a profile: the one renamed (none: a new one) and the text.
+    profile_edit: Option<(Option<String>, String)>,
     /// Screen x of the toolbar ♥ icon and the tag-row ♥ button centres.
     favorite_anchor: Option<f32>,
     identity_snapshot: Option<std::sync::Arc<crate::identity::Snapshot>>,
@@ -1696,6 +1701,8 @@ impl Viewer {
             previous_image: None,
             backend_checked: false,
             settings_snapshot: None,
+            pending_profile: None,
+            profile_edit: None,
             favorite_anchor: None,
             identity_snapshot: None,
             identity_pending: false,
@@ -1875,6 +1882,7 @@ impl Viewer {
         let picking = self.picking.clone();
         let tx = self.tx.clone();
         let kind = kind.to_string();
+        let place = self.lib.settings.dialog_places.get(&kind).copied();
         // Owned by NoirView's window: a click on the window cannot hide it.
         // Each kind keeps its own place, size and last folder (Windows).
         let mut dialog = rfd::FileDialog::new().set_client_guid(dialog_guid(&kind));
@@ -1883,7 +1891,8 @@ impl Viewer {
         }
         std::thread::spawn(move || {
             let _done = PickDone(picking);
-            let event = match kind.as_str() {
+            // Opened where it was last left; its place is kept for next time.
+            let (event, place) = crate::dialog_place::track(place, || match kind.as_str() {
                 "open" => dialog
                     .set_title("Open image folder")
                     .pick_folder()
@@ -1931,7 +1940,10 @@ impl Viewer {
                     .pick_file()
                     .map(Event::RestoreChoice),
                 _ => None,
-            };
+            });
+            if let Some(place) = place {
+                let _ = tx.send(Event::DialogPlace(kind, place));
+            }
             if let Some(e) = event {
                 let _ = tx.send(e);
             }
@@ -2440,6 +2452,12 @@ impl Viewer {
                 Event::ExtraBackup(p) => {
                     self.lib.settings.backup_extra = p;
                     self.changed();
+                }
+                Event::DialogPlace(kind, place) => {
+                    if self.lib.settings.dialog_places.get(&kind) != Some(&place) {
+                        self.lib.settings.dialog_places.insert(kind, place);
+                        self.changed();
+                    }
                 }
                 Event::FavoriteFolder(path) => {
                     let favorites = &mut self.lib.settings.favorite_folders;
@@ -5031,6 +5049,27 @@ impl Viewer {
         ) {
             self.request_restore();
             ui.close_menu();
+        }
+        if !self.lib.settings.profiles.is_empty() {
+            ui.menu_button("Profile", |ui| {
+                let active = self.lib.settings.active_profile.clone();
+                let names: Vec<String> = self
+                    .lib
+                    .settings
+                    .profiles
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                for name in names {
+                    if self
+                        .hover
+                        .button(ui, name.as_str(), name == active, true, false)
+                    {
+                        self.pending_profile = Some(name);
+                        ui.close_menu();
+                    }
+                }
+            });
         }
         ui.separator();
         if self.hover.button(ui, "Exit NoirView", false, true, true) {
@@ -7678,6 +7717,7 @@ impl Viewer {
         actions: &mut Vec<&'static str>,
     ) {
         ui.heading("Settings");
+        self.profile_row(ui);
         ui.horizontal_wrapped(|ui| {
             for (i, name) in [
                 "Display",
@@ -9188,6 +9228,181 @@ impl Viewer {
             }
         }
     }
+    /// Switches to a saved profile: its display and interaction settings,
+    /// the rest as they are.
+    fn apply_profile(&mut self, name: &str) {
+        let Some(profile) = self
+            .lib
+            .settings
+            .profiles
+            .iter()
+            .find(|p| p.name == name)
+            .cloned()
+        else {
+            return;
+        };
+        let sort_before = (
+            self.lib.settings.sort_key,
+            self.lib.settings.sort_descending,
+        );
+        self.lib.settings.apply_profile_values(&profile.values);
+        self.lib.settings.active_profile = profile.name.clone();
+        self.sync_history_limit();
+        self.images.invalidate();
+        if sort_before
+            != (
+                self.lib.settings.sort_key,
+                self.lib.settings.sort_descending,
+            )
+        {
+            self.sort_files();
+            if !self.lib.settings.sort_key.needs_metadata() {
+                self.rebuild();
+            }
+        }
+        self.changed();
+        self.notify(format!("Profile: {}", profile.name));
+    }
+    /// The settings in use saved as a profile: a new one, or over `name`.
+    fn save_profile(&mut self, name: &str) {
+        let values = self.lib.settings.profile_values();
+        let profiles = &mut self.lib.settings.profiles;
+        match profiles.iter_mut().find(|p| p.name == name) {
+            Some(p) => p.values = values,
+            None => profiles.push(Profile {
+                name: name.to_owned(),
+                values,
+            }),
+        }
+        self.lib.settings.active_profile = name.to_owned();
+        self.changed();
+    }
+    fn rename_profile(&mut self, from: &str, to: &str) {
+        let s = &mut self.lib.settings;
+        if s.profiles.iter().any(|p| p.name == to) {
+            return;
+        }
+        if let Some(p) = s.profiles.iter_mut().find(|p| p.name == from) {
+            p.name = to.to_owned();
+            if s.active_profile == from {
+                s.active_profile = to.to_owned();
+            }
+            self.changed();
+        }
+    }
+    fn delete_profile(&mut self, name: &str) {
+        let s = &mut self.lib.settings;
+        s.profiles.retain(|p| p.name != name);
+        if s.active_profile == name {
+            s.active_profile.clear();
+        }
+        self.changed();
+    }
+    /// Settings' profile row: the profile in use (and how many settings now
+    /// differ from it), Save, Save as new…, Rename…, Delete….
+    fn profile_row(&mut self, ui: &mut egui::Ui) {
+        let active = self.lib.settings.active_profile.clone();
+        let names: Vec<String> = self
+            .lib
+            .settings
+            .profiles
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let differences = self.lib.settings.profile_differences();
+        let shown = if active.is_empty() {
+            "(none)".to_owned()
+        } else if differences > 0 {
+            format!("{active} — {differences} changed")
+        } else {
+            active.clone()
+        };
+        // Labels centred on the buttons' line.
+        let row = Vec2::new(ui.available_width(), 26.);
+        let centred = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, centred, |ui| {
+            ui.label("Profile");
+            egui::ComboBox::from_id_salt("profile")
+                .selected_text(shown)
+                .width(220.)
+                .show_ui(ui, |ui| {
+                    if names.is_empty() {
+                        ui.label(RichText::new("No profiles yet: Save as new…").color(MUTED));
+                    }
+                    for name in &names {
+                        if ui.selectable_label(*name == active, name).clicked() {
+                            self.pending_profile = Some(name.clone());
+                        }
+                    }
+                });
+            if self.hover.button(
+                ui,
+                "Save",
+                false,
+                !active.is_empty() && differences > 0,
+                false,
+            ) {
+                self.save_profile(&active);
+            }
+            if self.hover.button(ui, "Save as new…", false, true, false) {
+                let mut n = names.len() + 1;
+                while names.contains(&format!("Profile {n}")) {
+                    n += 1;
+                }
+                self.profile_edit = Some((None, format!("Profile {n}")));
+            }
+            if self
+                .hover
+                .button(ui, "Rename…", false, !active.is_empty(), false)
+            {
+                self.profile_edit = Some((Some(active.clone()), active.clone()));
+            }
+            if self
+                .hover
+                .button(ui, "Delete…", false, !active.is_empty(), true)
+            {
+                self.dialog = Some(Dialog::DeleteProfile(active.clone()));
+            }
+        });
+        let Some((renamed, mut text)) = self.profile_edit.clone() else {
+            return;
+        };
+        let name = text.trim().to_owned();
+        let taken = names
+            .iter()
+            .any(|n| *n == name && Some(n) != renamed.as_ref());
+        let mut done = None;
+        ui.allocate_ui_with_layout(row, centred, |ui| {
+            ui.label(if renamed.is_some() {
+                "New name"
+            } else {
+                "New profile"
+            });
+            let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(200.));
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let ok = !name.is_empty() && !taken;
+            if (self.hover.button(ui, "OK", false, ok, false) || enter) && ok {
+                done = Some(true);
+            }
+            if self.hover.button(ui, "Cancel", false, true, false) {
+                done = Some(false);
+            }
+            if taken {
+                ui.label(RichText::new("A profile has that name").color(MUTED));
+            }
+        });
+        match done {
+            Some(true) => {
+                match renamed {
+                    Some(from) => self.rename_profile(&from, &name),
+                    None => self.save_profile(&name),
+                }
+                self.profile_edit = None;
+            }
+            Some(false) => self.profile_edit = None,
+            None => self.profile_edit = Some((renamed, text)),
+        }
+    }
     /// Settings' Cancel: back to the settings as they were when the window
     /// opened, and close it.
     fn cancel_settings(&mut self) {
@@ -9197,7 +9412,17 @@ impl Viewer {
                     self.lib.settings.sort_key,
                     self.lib.settings.sort_descending,
                 );
-            self.lib.settings = *before;
+            // Profiles saved, renamed or deleted meanwhile stay.
+            let mut before = *before;
+            before.profiles = std::mem::take(&mut self.lib.settings.profiles);
+            if !before
+                .profiles
+                .iter()
+                .any(|p| p.name == before.active_profile)
+            {
+                before.active_profile.clear();
+            }
+            self.lib.settings = before;
             self.sync_history_limit();
             self.images.invalidate();
             if sort {
@@ -9240,6 +9465,10 @@ ui.label(format!("{} image(s) and their metadata sidecars will be moved to Recyc
 if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
             Dialog::RestoreDeleted(paths)=>{ui.heading("Restore from Recycle Bin?");
 ui.label(format!("{} image(s) deleted last will be moved back to their folders.",paths.len()));for line in delete_dialog_lines(&paths){ui.label(line);}ui.horizontal(|ui|{if self.hover.button(ui,"Restore",false,!self.busy && !self.view_pending,false){self.restore_deleted();close=true;}
+if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
+            Dialog::DeleteProfile(name)=>{ui.heading(format!("Delete the profile \"{name}\"?"));
+ui.label("The settings in use stay as they are.");
+ui.horizontal(|ui|{if self.hover.button(ui,"Delete",false,true,true){self.delete_profile(&name);close=true;}
 if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
             Dialog::RoundDone(n)=>{ui.heading("All images shown");
 ui.label(format!("All {n} images of the list have been shown. Browsing goes on with a new round."));
@@ -10463,6 +10692,9 @@ impl eframe::App for Viewer {
         self.help_window(ctx);
         self.hover.area = HoverArea::Settings;
         self.settings_window(ctx);
+        if let Some(name) = self.pending_profile.take() {
+            self.apply_profile(&name);
+        }
         self.hover.area = HoverArea::General;
         self.dialogs(ctx);
         self.window_diagnostics(ctx);
@@ -11834,6 +12066,78 @@ mod tests {
             0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000
         );
         assert_eq!(dialog_guid("unknown"), dialog_guid("other"));
+    }
+    #[test]
+    fn profiles_are_saved_switched_renamed_and_deleted() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        v.lib.settings.fit = true;
+        v.lib.settings.round_notice_size = 40.;
+        v.save_profile("Day");
+        assert_eq!(v.lib.settings.active_profile, "Day");
+        v.lib.settings.fit = false;
+        v.lib.settings.round_notice_size = 20.;
+        v.lib.settings.destination = "/moved-to".into();
+        assert_eq!(v.lib.settings.profile_differences(), 2);
+        v.save_profile("Night");
+        v.apply_profile("Day");
+        assert!(v.lib.settings.fit && v.lib.settings.round_notice_size == 40.);
+        assert_eq!(v.lib.settings.active_profile, "Day");
+        assert_eq!(v.lib.settings.destination, PathBuf::from("/moved-to"));
+        v.pending_profile = Some("Night".into());
+        let name = v.pending_profile.take().unwrap();
+        v.apply_profile(&name);
+        assert!(!v.lib.settings.fit);
+        // Rename keeps it in use; a taken name is refused.
+        v.rename_profile("Night", "Evening");
+        assert_eq!(v.lib.settings.active_profile, "Evening");
+        v.rename_profile("Evening", "Day");
+        assert_eq!(v.lib.settings.profiles.len(), 2);
+        assert!(v.lib.settings.profiles.iter().any(|p| p.name == "Evening"));
+        // Cancel in Settings keeps the profiles saved meanwhile.
+        v.settings = true;
+        v.settings_snapshot = Some(Box::new(v.lib.settings.clone()));
+        v.save_profile("Third");
+        v.lib.settings.fit = true;
+        v.cancel_settings();
+        assert!(!v.lib.settings.fit);
+        assert_eq!(v.lib.settings.profiles.len(), 3);
+        v.delete_profile("Evening");
+        assert!(v.lib.settings.active_profile.is_empty());
+        assert_eq!(v.lib.settings.profiles.len(), 2);
+    }
+    #[test]
+    fn a_file_dialog_place_is_kept_per_kind() {
+        let ctx = egui::Context::default();
+        let mut v = viewer(&ctx);
+        v.tx.send(Event::DialogPlace("open".into(), [120, 80]))
+            .unwrap();
+        v.poll(&ctx);
+        assert_eq!(v.lib.settings.dialog_places.get("open"), Some(&[120, 80]));
+        // Not part of profiles.
+        assert!(!v
+            .lib
+            .settings
+            .profile_values()
+            .contains_key("dialog_places"));
+    }
+    #[test]
+    fn raising_the_title_does_not_move_noirview() {
+        let ctx = egui::Context::default();
+        let row = |raise: f32| {
+            let mut rect = Rect::NOTHING;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    rect = ui
+                        .horizontal(|ui| title_line(ui, Some("a title.jpg".into()), 600., raise))
+                        .response
+                        .rect;
+                });
+            });
+            rect
+        };
+        assert_eq!(row(0.), row(6.));
+        assert_eq!(row(0.), row(-6.));
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {

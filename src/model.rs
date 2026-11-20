@@ -406,6 +406,12 @@ pub struct Settings {
     pub path_forward_slashes: bool,
     /// The image view's title shows the folder before the image name.
     pub image_title_folder: bool,
+    /// Where each kind of file dialog was last left (Windows; screen pixels).
+    pub dialog_places: BTreeMap<String, [i32; 2]>,
+    /// Named sets of display and interaction settings, and the one in use
+    /// (empty: none).
+    pub profiles: Vec<Profile>,
+    pub active_profile: String,
     /// The title after NOIRVIEW shares its baseline, raised by this many
     /// points (negative: lowered).
     pub title_raise: f32,
@@ -589,6 +595,9 @@ impl Default for Settings {
             path_forward_slashes: false,
             image_title_folder: false,
             title_raise: 0.,
+            dialog_places: BTreeMap::new(),
+            profiles: Vec::new(),
+            active_profile: String::new(),
             grid_page_wrap: false,
             preview_close_move_px: 0.,
             grid_viewer_browse: false,
@@ -706,6 +715,52 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    /// The settings a profile keeps, by their saved names.
+    pub fn profile_values(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut values = match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        values.retain(|k, _| !PROFILE_EXCLUDED.contains(&k.as_str()));
+        values
+    }
+    /// Sets the profile's settings; settings it does not have (newer than
+    /// the profile) and values this version cannot read stay as they are.
+    pub fn apply_profile_values(&mut self, values: &serde_json::Map<String, serde_json::Value>) {
+        let Ok(serde_json::Value::Object(mut current)) = serde_json::to_value(&*self) else {
+            return;
+        };
+        for (key, value) in values {
+            if PROFILE_EXCLUDED.contains(&key.as_str()) || !current.contains_key(key) {
+                continue;
+            }
+            let old = current.insert(key.clone(), value.clone());
+            if serde_json::from_value::<Settings>(serde_json::Value::Object(current.clone()))
+                .is_err()
+            {
+                if let Some(old) = old {
+                    current.insert(key.clone(), old);
+                }
+            }
+        }
+        if let Ok(settings) = serde_json::from_value::<Settings>(serde_json::Value::Object(current))
+        {
+            *self = settings;
+            self.initialize_after_load();
+        }
+    }
+    /// The settings that differ from the profile in use (none in use: 0).
+    pub fn profile_differences(&self) -> usize {
+        let Some(profile) = self.profiles.iter().find(|p| p.name == self.active_profile) else {
+            return 0;
+        };
+        let now = self.profile_values();
+        profile
+            .values
+            .iter()
+            .filter(|(k, v)| now.get(*k).is_some_and(|n| !same_value(n, v)))
+            .count()
+    }
     pub fn tag_width(&self) -> f32 {
         let width = self.tags_max_width.unwrap_or(self.bar_width);
         if width.is_finite() {
@@ -763,6 +818,88 @@ pub struct Library {
     /// The last move to the Recycle Bin (Restore deleted).
     pub last_deletion: Option<Deletion>,
 }
+/// A profile: a name and the display and interaction settings it sets
+/// (settings by their saved names; those not in it stay as they are).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Profile {
+    pub name: String,
+    pub values: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Settings a profile leaves alone: folders and files, folder watching and
+/// the service, caches, backups, the graphics backend, diagnostics, the
+/// profiles themselves and remembered places.
+pub const PROFILE_EXCLUDED: &[&str] = &[
+    "profiles",
+    "active_profile",
+    "dialog_places",
+    "delete_pos",
+    "favorite_folders",
+    "recursive",
+    "watch_folders",
+    "watched_folders",
+    "watch_background",
+    "watch_while_active",
+    "watch_when_unfocused",
+    "watch_pace",
+    "watch_use_journal",
+    "thumbnail_cache_dir",
+    "thumbnail_cache_mb",
+    "pregenerate_thumbnails",
+    "loading_mode",
+    "cache_while_active",
+    "cache_when_unfocused",
+    "proxy_cache_mb",
+    "proxy_min_side",
+    "cache_mb",
+    "animation_mb",
+    "prefetch_ahead",
+    "prefetch_behind",
+    "history_limit",
+    "destination",
+    "verified_move",
+    "music",
+    "model_path",
+    "ort_library",
+    "tile_size",
+    "backup_extra",
+    "backup_days",
+    "backup_hour",
+    "backup_minute",
+    "backup_schedule",
+    "backup_exit",
+    "backup_keep",
+    "graphics_backend",
+    "low_latency_display",
+    "remember_window",
+    "diagnostic_log",
+    "window_diagnostics",
+    "grid_last_normal",
+    "forget_deletion_on_close",
+];
+
+/// Equal settings values, numbers by value at f32 precision (60 and 60.0
+/// alike; a saved and read back 0.92 is not exactly the f32 0.92).
+fn same_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-6 * x.abs().max(y.abs()).max(1.),
+            _ => x == y,
+        },
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_value(x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| same_value(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
 /// A favorite folder: its name in the list (empty: the folder's name).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1302,6 +1439,84 @@ pub fn scan(folder: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    #[test]
+    fn a_profile_keeps_display_and_interaction_settings_only() {
+        let mut s = Settings {
+            fit: false,
+            lens_zoom: 4.,
+            round_notice_fade: true,
+            thumbnail_cache_dir: "/cache".into(),
+            destination: "/dest".into(),
+            ..Settings::default()
+        };
+        s.watched_folders.push(WatchedFolder {
+            path: "/watched".into(),
+            subfolders: true,
+        });
+        let values = s.profile_values();
+        assert_eq!(values.get("fit"), Some(&serde_json::json!(false)));
+        assert!(values.contains_key("lens_zoom") && values.contains_key("shortcuts"));
+        for key in PROFILE_EXCLUDED {
+            assert!(!values.contains_key(*key), "{key}");
+        }
+        // Every excluded name is a real setting (a renamed one would slip in).
+        let all = serde_json::to_value(Settings::default()).unwrap();
+        for key in PROFILE_EXCLUDED {
+            assert!(all.get(*key).is_some(), "{key} is not a setting");
+        }
+        // Applied elsewhere: only its settings change; the folders stay.
+        let mut other = Settings {
+            thumbnail_cache_dir: "/other-cache".into(),
+            destination: "/other".into(),
+            ..Settings::default()
+        };
+        other.apply_profile_values(&values);
+        assert!(!other.fit && other.lens_zoom == 4. && other.round_notice_fade);
+        assert_eq!(other.thumbnail_cache_dir, PathBuf::from("/other-cache"));
+        assert_eq!(other.destination, PathBuf::from("/other"));
+        assert!(other.watched_folders.is_empty());
+    }
+    #[test]
+    fn a_profile_from_another_version_sets_what_it_can() {
+        let mut values = serde_json::Map::new();
+        values.insert("fit".into(), serde_json::json!(false));
+        // A setting this version does not have, one it cannot read, and an
+        // excluded one written by hand.
+        values.insert("no_such_setting".into(), serde_json::json!(1));
+        values.insert("lens_zoom".into(), serde_json::json!("big"));
+        values.insert("destination".into(), serde_json::json!("/x"));
+        let mut s = Settings::default();
+        s.apply_profile_values(&values);
+        assert!(!s.fit);
+        assert_eq!(s.lens_zoom, Settings::default().lens_zoom);
+        assert_eq!(s.destination, Settings::default().destination);
+    }
+    #[test]
+    fn differences_from_the_profile_in_use_are_counted() {
+        let mut s = Settings::default();
+        assert_eq!(s.profile_differences(), 0, "none in use");
+        s.profiles.push(Profile {
+            name: "Evening".into(),
+            values: s.profile_values(),
+        });
+        s.active_profile = "Evening".into();
+        assert_eq!(s.profile_differences(), 0);
+        // A number written another way is the same.
+        s.profiles[0].values.insert(
+            "thumbnail_count".into(),
+            serde_json::json!(s.thumbnail_count as f64),
+        );
+        assert_eq!(s.profile_differences(), 0);
+        // Saved and read back: floats come back within f32 precision.
+        let text = serde_json::to_string(&s).unwrap();
+        let s2: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(s2.profile_differences(), 0);
+        s.fit = !s.fit;
+        s.lens_zoom += 1.;
+        // Settings outside profiles do not count.
+        s.destination = "/elsewhere".into();
+        assert_eq!(s.profile_differences(), 2);
+    }
     fn numbered(count: usize) -> VisibleFiles {
         (0..count)
             .map(|i| PathBuf::from(format!("{i}.jpg")))

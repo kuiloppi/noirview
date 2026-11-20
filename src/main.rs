@@ -6,6 +6,7 @@ mod bar_layout;
 mod clipboard;
 mod comfy;
 mod decode_stats;
+mod dialog_place;
 mod disk;
 mod folder;
 mod gesture;

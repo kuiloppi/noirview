@@ -15,6 +15,7 @@ A quiet, dark image viewer for Windows 10/11 (64-bit), written in Rust with egui
 - **Bars:** a floating toolbar, the grid's icon bar or text buttons and the big image's bar; every button can be reordered, hidden or put in a group behind ».
 - **Folder watching:** changes in the open and watched folders are picked up; on NTFS an optional service reads the USN journal (`noirview-usn.exe`).
 - **Rendering:** OpenGL by default on Windows; Vulkan or DirectX 12 (wgpu) can be chosen. Optional AI upscaling through ONNX Runtime with DirectML (bring your own model).
+- **Profiles:** named sets of display and interaction settings, switched from Settings or the right-click menu.
 - **Portable:** settings and caches live in a `data` folder next to the program.
 
 ## Build
