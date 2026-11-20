@@ -626,6 +626,122 @@ fn page_order_label(order: crate::model::Order) -> &'static str {
     }
 }
 /// The number of marked images on an icon's corner.
+/// NOIRVIEW, "/" and the title on one baseline: each glyph's baseline is
+/// known, so the smaller title is placed by it, then raised by `raise`
+/// points. A long title is cut with "…" (the whole of it on hover).
+fn title_line(ui: &mut egui::Ui, title: Option<String>, width: f32, raise: f32) {
+    use egui::text::{LayoutJob, TextFormat};
+    let format =
+        |size: f32, color: Color32| TextFormat::simple(egui::FontId::proportional(size), color);
+    let mut head = LayoutJob::default();
+    head.append("N O I R V I E W", 0., format(13., GREEN));
+    if title.is_some() {
+        head.append("/", 8., format(13., MUTED));
+    }
+    let head = ui.fonts(|f| f.layout_job(head));
+    let baseline = |g: &egui::Galley| {
+        g.rows
+            .first()
+            .and_then(|r| r.glyphs.first())
+            .map_or(g.size().y, |glyph| glyph.pos.y)
+    };
+    let tail = title.as_ref().map(|t| {
+        let mut job = LayoutJob::single_section(t.clone(), format(12., MUTED));
+        job.wrap.max_width = (width - head.size().x - 8.).max(40.);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        ui.fonts(|f| f.layout_job(job))
+    });
+    // The title's top relative to the head's top.
+    let tail_top = tail
+        .as_ref()
+        .map_or(0., |t| baseline(&head) - baseline(t) - raise);
+    let top = tail_top.min(0.);
+    let bottom = tail
+        .as_ref()
+        .map_or(head.size().y, |t| head.size().y.max(tail_top + t.size().y));
+    let tail_width = tail.as_ref().map_or(0., |t| 8. + t.size().x);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(head.size().x + tail_width, bottom - top),
+        Sense::hover(),
+    );
+    let origin = rect.min - Vec2::new(0., top);
+    if let (Some(t), Some(title)) = (&tail, &title) {
+        if t.elided {
+            response.on_hover_text(title.clone());
+        }
+    }
+    let painter = ui.painter();
+    painter.galley(origin, head.clone(), Color32::WHITE);
+    if let Some(t) = tail {
+        painter.galley(
+            origin + Vec2::new(head.size().x + 8., tail_top),
+            t,
+            Color32::WHITE,
+        );
+    }
+}
+
+/// The GUID under which Windows keeps a file dialog's position, size and
+/// last folder: one per kind of dialog, the same in every NoirView version.
+fn dialog_guid(kind: &str) -> u128 {
+    const KINDS: [&str; 12] = [
+        "open",
+        "file",
+        "destination",
+        "tracks",
+        "model",
+        "runtime",
+        "backup",
+        "cache_dir",
+        "favorite",
+        "watch",
+        "restore",
+        "other",
+    ];
+    let index = KINDS
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(KINDS.len() - 1);
+    0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000 + index as u128
+}
+
+/// Clickable text without a button's frame: no box on hover or when chosen,
+/// only the text's colour changes (chosen: green, hovered: bright).
+fn plain_text_link(ui: &mut egui::Ui, text: String, chosen: bool, enabled: bool) -> egui::Response {
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(galley.size(), sense);
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    let visuals = ui.visuals();
+    let color = if !enabled {
+        visuals.weak_text_color()
+    } else if response.hovered() {
+        visuals.strong_text_color()
+    } else if chosen {
+        GREEN
+    } else {
+        visuals.text_color()
+    };
+    if ui.is_rect_visible(rect) {
+        ui.painter().galley(rect.min, galley, color);
+    }
+    response
+}
+
 fn count_badge(ui: &egui::Ui, rect: Rect, n: usize, color: Color32) {
     let center = rect.right_top() + Vec2::new(-7., 7.);
     let text = if n > 999 {
@@ -1311,6 +1427,8 @@ pub struct Viewer {
     /// Images shown in the image view so far (the round notice can go after
     /// a number of new ones).
     images_shown: u64,
+    /// When the round notice began to fade out.
+    round_fade_out: Option<Instant>,
     /// Settings: scroll to this section when the window next draws.
     settings_scroll: Option<&'static str>,
     /// Where the pointer was when the hover preview opened.
@@ -1567,6 +1685,7 @@ impl Viewer {
             preview_origin: None,
             round_message: None,
             images_shown: 0,
+            round_fade_out: None,
             settings_scroll: None,
             controls_rect: None,
             tags_anchor: None,
@@ -1757,7 +1876,8 @@ impl Viewer {
         let tx = self.tx.clone();
         let kind = kind.to_string();
         // Owned by NoirView's window: a click on the window cannot hide it.
-        let mut dialog = rfd::FileDialog::new();
+        // Each kind keeps its own place, size and last folder (Windows).
+        let mut dialog = rfd::FileDialog::new().set_client_guid(dialog_guid(&kind));
         if let Some(parent) = &self.parent_window {
             dialog = dialog.set_parent(parent);
         }
@@ -1875,6 +1995,9 @@ impl Viewer {
         self.other_filter = Filter::default();
         self.delete_selection.clear();
         self.tag_selection.clear();
+        // Images chosen for moving belong to the folder they were chosen in.
+        self.move_selection.clear();
+        self.move_mode = false;
 
         self.index_progress = None;
         self.last_index = None;
@@ -1934,6 +2057,8 @@ impl Viewer {
                     self.delete_selection
                         .retain(|p| self.folder_paths.contains(p));
                     self.tag_selection.retain(|p| self.folder_paths.contains(p));
+                    self.move_selection
+                        .retain(|p| self.folder_paths.contains(p));
                 }
                 Update::Keywords(entries) => {
                     changed |= folder::apply_keywords(
@@ -2115,6 +2240,9 @@ impl Viewer {
         if let Some(p) = path {
             self.current = Some(p.clone());
             self.lib.last_image = Some(p.clone());
+            // Counted when browsed to, not when drawn: fast wheel browsing
+            // can pass several images within one frame.
+            self.count_round(&p);
             if big {
                 self.grid_viewer = Some(p.clone());
                 self.grid_ghosts = None;
@@ -2217,6 +2345,7 @@ impl Viewer {
         self.folder_paths.retain(|p| !removed.contains(p));
         self.delete_selection.retain(|p| !removed.contains(p));
         self.tag_selection.retain(|p| !removed.contains(p));
+        self.move_selection.retain(|p| !removed.contains(p));
         self.view_fallback = Some(old_index);
         // Not rebuild(): the deleted tiles of this page stay visible.
         self.schedule_view(true);
@@ -2765,8 +2894,9 @@ impl Viewer {
         (clicked, long)
     }
     /// Round notice: counts the images shown in the image view with In
-    /// order / Shuffle; once every image of the list has been shown, a
-    /// notice (or a dialog) says so and a new round starts.
+    /// order / Shuffle (browsed to, or drawn when shown another way); once
+    /// every image of the list has been shown, a notice (or a dialog) says
+    /// so and a new round starts.
     fn count_round(&mut self, path: &Path) {
         use crate::model::Order;
         if self.grid || self.round_last.as_deref() == Some(path) {
@@ -2810,6 +2940,7 @@ impl Viewer {
                     self.dialog = Some(Dialog::RoundDone(n));
                 }
             } else {
+                self.round_fade_out = None;
                 self.round_message = Some((
                     format!("All {n} images shown: a new round begins"),
                     Instant::now(),
@@ -2965,14 +3096,14 @@ impl Viewer {
                 for f in favorites {
                     let here = open.as_ref() == Some(&f.path);
                     // Buttons, or plain "/name", or a folder icon and the name.
-                    let button = match style.as_str() {
-                        "text" => egui::Button::new(format!("/{}", f.label())).frame(false),
-                        "icon" => egui::Button::new(format!("🗀 {}", f.label())).frame(false),
-                        _ => egui::Button::new(f.label()),
-                    };
-                    let r = ui
-                        .add_enabled(!self.busy, button.selected(here))
-                        .on_hover_text(f.path.display().to_string());
+                    let r = match style.as_str() {
+                        "text" => plain_text_link(ui, format!("/{}", f.label()), here, !self.busy),
+                        "icon" => plain_text_link(ui, format!("🗀 {}", f.label()), here, !self.busy),
+                        _ => {
+                            ui.add_enabled(!self.busy, egui::Button::new(f.label()).selected(here))
+                        }
+                    }
+                    .on_hover_text(f.path.display().to_string());
                     if self.hover.watch(r, false).clicked() {
                         self.open(f.path.clone());
                         done = true;
@@ -3300,25 +3431,12 @@ impl Viewer {
                 }
                 ui.add_space(14.);
                 let title = self.top_title(grid_tiles);
+                let raise = self.lib.settings.title_raise.clamp(-6., 6.);
                 ui.horizontal(|ui| {
                     ui.add_space(20.);
-                    ui.label(RichText::new("N O I R V I E W").size(13.).color(GREEN));
-                    if let Some(title) = title {
-                        ui.label(RichText::new("/").color(MUTED));
-                        // Room is left for Info, ? and Settings at the right.
-                        let width = (ui.available_width() - 240.).max(80.);
-                        // Centred on the NOIRVIEW line, like the "/" before it.
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(width, 20.),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(title).color(MUTED).size(12.))
-                                        .truncate(),
-                                );
-                            },
-                        );
-                    }
+                    // Room is left for Info, ? and Settings at the right.
+                    let width = (ui.available_width() - 240.).max(160.);
+                    title_line(ui, title, width, raise);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(16.);
                         if self
@@ -4154,10 +4272,31 @@ impl Viewer {
         // Or gone once this many new images have been shown.
         let enough = s.round_notice_images > 0
             && self.images_shown.saturating_sub(shown_at) >= u64::from(s.round_notice_images);
-        if left.is_zero() || enough {
-            self.round_message = None;
-            return;
-        }
+        let fade = if s.round_notice_fade {
+            Duration::from_millis(u64::from(s.round_notice_fade_ms.min(5000)))
+        } else {
+            Duration::ZERO
+        };
+        let (alpha, left) = if left.is_zero() || enough {
+            // Fading out, or gone.
+            let since = self
+                .round_fade_out
+                .get_or_insert_with(Instant::now)
+                .elapsed();
+            if since >= fade {
+                self.round_message = None;
+                self.round_fade_out = None;
+                return;
+            }
+            (
+                1. - since.as_secs_f32() / fade.as_secs_f32(),
+                Duration::ZERO,
+            )
+        } else if started.elapsed() < fade {
+            (started.elapsed().as_secs_f32() / fade.as_secs_f32(), left)
+        } else {
+            (1., left)
+        };
         if self.image_only() {
             return;
         }
@@ -4167,7 +4306,7 @@ impl Viewer {
             _ => (egui::Align2::CENTER_CENTER, Vec2::ZERO),
         };
         let c = s.round_notice_color;
-        let opacity = s.round_notice_opacity.clamp(0.05, 1.);
+        let opacity = s.round_notice_opacity.clamp(0.05, 1.) * alpha.clamp(0., 1.);
         let color =
             Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as f32 * opacity) as u8);
         let size = s.round_notice_size.clamp(10., 120.);
@@ -4187,7 +4326,11 @@ impl Viewer {
                         ui.label(RichText::new(message).size(size).color(color));
                     });
             });
-        ctx.request_repaint_after(left.min(Duration::from_millis(250)));
+        if alpha < 1. {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(left.min(Duration::from_millis(250)));
+        }
     }
     fn initial_grid_normal(&self) -> bool {
         match self.lib.settings.grid_start_mode {
@@ -6883,6 +7026,7 @@ impl Viewer {
                         // Off: the count starts over.
                         self.round_seen.clear();
                         self.round_message = None;
+                        self.round_fade_out = None;
                     }
                     self.changed();
                 }
@@ -7898,6 +8042,12 @@ impl Viewer {
                         "…or gone after this many new images (0 = only the time)",
                     );
                     ui.horizontal_wrapped(|ui| {
+                        h.check(ui, &mut s.round_notice_fade, "Fade in and out");
+                        ui.add_enabled_ui(s.round_notice_fade, |ui| {
+                            h.slider(ui, &mut s.round_notice_fade_ms, 50..=2000, "Fade (ms)");
+                        });
+                    });
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Notice place");
                         for (value, label) in
                             [("top", "Top"), ("center", "Centre"), ("bottom", "Bottom")]
@@ -8536,6 +8686,12 @@ impl Viewer {
                     ui,
                     &mut s.path_forward_slashes,
                     "Show folder paths with forward slashes (D:/Photos)",
+                );
+                h.slider(
+                    ui,
+                    &mut s.title_raise,
+                    -6.0..=6.0,
+                    "Raise the title beside NOIRVIEW (px, 0 = same baseline)",
                 );
                 ui.label("Image loading");
                 ui.horizontal_wrapped(|ui| {
@@ -11175,6 +11331,69 @@ mod tests {
         assert!(v.dialog.is_none());
     }
     #[test]
+    fn images_browsed_past_count_for_the_round_without_being_drawn() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 6);
+        v.lib.settings.order = crate::model::Order::Sequential;
+        v.lib.settings.round_notice_images = 3;
+        let first = v.files[0].clone();
+        // The first image is drawn; the wheel then passes the other five
+        // within frames that draw only some of them.
+        v.count_round(&first);
+        for _ in 0..4 {
+            v.navigate(true);
+        }
+        assert!(v.round_message.is_none(), "five of six");
+        assert_eq!(v.images_shown, 5);
+        v.navigate(true);
+        assert!(v
+            .round_message
+            .as_ref()
+            .is_some_and(|(t, _, _)| t.starts_with("All 6 images")));
+        // Drawing the image browsed to does not count it twice.
+        let last = v.current.clone().unwrap();
+        v.count_round(&last);
+        assert_eq!(v.images_shown, 6);
+        // Browsing on counts towards the notice going away.
+        for _ in 0..3 {
+            v.navigate(true);
+        }
+        let _ = ctx.run(egui::RawInput::default(), |ctx| v.draw_round_message(ctx));
+        assert!(v.round_message.is_none(), "gone after three new images");
+    }
+    #[test]
+    fn the_round_notice_can_fade_out_before_it_goes() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        v.lib.settings.order = crate::model::Order::Sequential;
+        v.lib.settings.round_notice_images = 1;
+        v.lib.settings.round_notice_fade = true;
+        v.lib.settings.round_notice_fade_ms = 400;
+        let files = v.files.clone();
+        for p in &files {
+            v.count_round(p);
+        }
+        let frame = |v: &mut Viewer| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| v.draw_round_message(ctx));
+        };
+        frame(&mut v);
+        assert!(v.round_message.is_some() && v.round_fade_out.is_none());
+        // One new image: the notice fades out instead of vanishing.
+        v.count_round(&files[0]);
+        frame(&mut v);
+        assert!(v.round_message.is_some() && v.round_fade_out.is_some());
+        v.round_fade_out = Instant::now().checked_sub(Duration::from_millis(500));
+        frame(&mut v);
+        assert!(v.round_message.is_none() && v.round_fade_out.is_none());
+        // Without the fade it goes at once.
+        v.lib.settings.round_notice_fade = false;
+        v.count_round(&files[1]);
+        assert!(v.round_message.is_some(), "the third of the next round");
+        v.count_round(&files[0]);
+        frame(&mut v);
+        assert!(v.round_message.is_none());
+    }
+    #[test]
     fn after_go_to_browsing_back_shows_the_previous_image_in_order() {
         let ctx = egui::Context::default();
         let mut v = browsing_viewer(&ctx, 21);
@@ -11562,6 +11781,59 @@ mod tests {
         assert!(v.visible.is_empty());
         assert!(v.current.is_none());
         v.folders.cancel();
+    }
+    #[test]
+    fn images_chosen_for_moving_are_dropped_when_another_folder_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 4);
+        v.grid = true;
+        v.move_mode = true;
+        v.move_selection = v.files[..2].iter().cloned().collect();
+        v.delete_selection.insert(v.files[2].clone());
+        // Images removed from the open folder leave the selection.
+        v.folder_paths = v.files.iter().skip(1).cloned().collect();
+        let gone = v.files[0].clone();
+        v.remove_from_view(std::slice::from_ref(&gone));
+        assert!(!v.move_selection.contains(&gone) && v.move_selection.len() == 1);
+        // Another folder: nothing chosen there, Move mode ends.
+        v.open(second.clone());
+        while v.pending_open.is_some() {
+            v.retire.pump();
+            v.begin_open();
+            std::thread::yield_now();
+        }
+        assert_eq!(v.folder, Some(second));
+        assert!(v.move_selection.is_empty() && !v.move_mode);
+        assert!(v.delete_selection.is_empty());
+        v.folders.cancel();
+    }
+    #[test]
+    fn every_kind_of_file_dialog_keeps_its_own_state() {
+        let kinds = [
+            "open",
+            "file",
+            "destination",
+            "tracks",
+            "model",
+            "runtime",
+            "backup",
+            "cache_dir",
+            "favorite",
+            "watch",
+            "restore",
+        ];
+        let guids: HashSet<u128> = kinds.iter().map(|k| dialog_guid(k)).collect();
+        assert_eq!(guids.len(), kinds.len());
+        // Fixed across versions, so Windows finds the saved place again.
+        assert_eq!(
+            dialog_guid("open"),
+            0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000
+        );
+        assert_eq!(dialog_guid("unknown"), dialog_guid("other"));
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {

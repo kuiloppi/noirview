@@ -1,6 +1,6 @@
 [package]
 name = "noirview"
-version = "0.1.64"
+version = "0.1.65"
 edition = "2021"
 rust-version = "1.89"
 description = "A quiet, GPU-rendered image viewer for Windows"
@@ -66,3 +66,6 @@ jpeg-encoder = "0.7.1"
 # surface follows the window's size before every frame (Windows).
 [patch.crates-io]
 eframe = { path = "vendor/eframe" }
+# rfd with one addition (vendor/rfd/NOIRVIEW_PATCH.md): Windows file dialogs
+# keep their position, size and last folder (IFileDialog::SetClientGuid).
+rfd = { path = "vendor/rfd" }

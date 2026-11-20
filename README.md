@@ -36,8 +36,8 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-`vendor/eframe` is eframe 0.31.1 with small changes, described in `vendor/eframe/NOIRVIEW_PATCH.md`.
+`vendor/eframe` is eframe 0.31.1 and `vendor/rfd` is rfd 0.15.4, each with small changes described in its `NOIRVIEW_PATCH.md`.
 
 ## License
 
-MIT (see `LICENSE`). Third-party licenses: `THIRD-PARTY-NOTICES.txt` in the package, `vendor/eframe/LICENSE-*`.
+MIT (see `LICENSE`). Third-party licenses: `THIRD-PARTY-NOTICES.txt` in the package, `vendor/eframe/LICENSE-*`, `vendor/rfd/LICENSE`.

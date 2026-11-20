@@ -395,6 +395,9 @@ pub struct Settings {
     pub round_notice_secs: f32,
     pub round_notice_opacity: f32,
     pub round_notice_images: u32,
+    /// The round notice fades in and out over this many milliseconds.
+    pub round_notice_fade: bool,
+    pub round_notice_fade_ms: u32,
     /// Which way the pointer must move to close the hover preview: "any",
     /// "up", "down", "left" or "right".
     pub preview_close_move_dir: String,
@@ -403,6 +406,9 @@ pub struct Settings {
     pub path_forward_slashes: bool,
     /// The image view's title shows the folder before the image name.
     pub image_title_folder: bool,
+    /// The title after NOIRVIEW shares its baseline, raised by this many
+    /// points (negative: lowered).
+    pub title_raise: f32,
     /// Grid pages wrap around: before the first page comes the last one and
     /// after the last the first (In order pages).
     pub grid_page_wrap: bool,
@@ -577,9 +583,12 @@ impl Default for Settings {
             round_notice_secs: 3.,
             round_notice_opacity: 0.9,
             round_notice_images: 0,
+            round_notice_fade: false,
+            round_notice_fade_ms: 300,
             preview_close_move_dir: "any".into(),
             path_forward_slashes: false,
             image_title_folder: false,
+            title_raise: 0.,
             grid_page_wrap: false,
             preview_close_move_px: 0.,
             grid_viewer_browse: false,
