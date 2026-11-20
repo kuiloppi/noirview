@@ -168,6 +168,25 @@ fn first_view_name(side: usize) -> &'static str {
         "Preview"
     }
 }
+/// NoirView's window, for file and folder dialogs: owned by it, a dialog
+/// stays in front of it (and the window waits for the dialog).
+struct ParentWindow {
+    window: wgpu::rwh::RawWindowHandle,
+    display: wgpu::rwh::RawDisplayHandle,
+}
+impl wgpu::rwh::HasWindowHandle for ParentWindow {
+    fn window_handle(&self) -> Result<wgpu::rwh::WindowHandle<'_>, wgpu::rwh::HandleError> {
+        // SAFETY: the handle of the app's own window, which outlives the
+        // dialogs (they end before the window closes).
+        Ok(unsafe { wgpu::rwh::WindowHandle::borrow_raw(self.window) })
+    }
+}
+impl wgpu::rwh::HasDisplayHandle for ParentWindow {
+    fn display_handle(&self) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        // SAFETY: as above.
+        Ok(unsafe { wgpu::rwh::DisplayHandle::borrow_raw(self.display) })
+    }
+}
 /// Clears the open-dialog flag when the dialog thread ends (also on panic).
 struct PickDone(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Drop for PickDone {
@@ -1271,6 +1290,8 @@ pub struct Viewer {
     /// Settings → Library → Favorite folders: the entry whose folder is
     /// being chosen again (None: a new one).
     favorite_pick: Option<usize>,
+    /// NoirView's window, the owner of file and folder dialogs.
+    parent_window: Option<ParentWindow>,
     /// A file or folder dialog is open (only one at a time).
     picking: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Buttons being held (start, the long press already fired).
@@ -1286,7 +1307,10 @@ pub struct Viewer {
     round_last: Option<PathBuf>,
     round_order: Option<crate::model::Order>,
     /// The round notice on screen (text, since).
-    round_message: Option<(String, Instant)>,
+    round_message: Option<(String, Instant, u64)>,
+    /// Images shown in the image view so far (the round notice can go after
+    /// a number of new ones).
+    images_shown: u64,
     /// Settings: scroll to this section when the window next draws.
     settings_scroll: Option<&'static str>,
     /// Where the pointer was when the hover preview opened.
@@ -1532,6 +1556,7 @@ impl Viewer {
             bar_buttons_tab: "toolbar",
             holds: HashMap::new(),
             picking: std::sync::Arc::default(),
+            parent_window: None,
             favorite_pick: None,
             popup: None,
             goto_text: String::new(),
@@ -1541,6 +1566,7 @@ impl Viewer {
             round_order: None,
             preview_origin: None,
             round_message: None,
+            images_shown: 0,
             settings_scroll: None,
             controls_rect: None,
             tags_anchor: None,
@@ -1730,9 +1756,13 @@ impl Viewer {
         let picking = self.picking.clone();
         let tx = self.tx.clone();
         let kind = kind.to_string();
+        // Owned by NoirView's window: a click on the window cannot hide it.
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(parent) = &self.parent_window {
+            dialog = dialog.set_parent(parent);
+        }
         std::thread::spawn(move || {
             let _done = PickDone(picking);
-            let dialog = rfd::FileDialog::new();
             let event = match kind.as_str() {
                 "open" => dialog
                     .set_title("Open image folder")
@@ -2743,6 +2773,7 @@ impl Viewer {
             return;
         }
         self.round_last = Some(path.to_path_buf());
+        self.images_shown += 1;
         let order = if self.slideshow {
             self.lib.settings.slideshow_order
         } else {
@@ -2752,10 +2783,12 @@ impl Viewer {
             self.round_order = Some(order);
             self.round_seen.clear();
         }
-        if !self.lib.settings.round_notice
-            || order == Order::Random
-            || self.visible.len() < 2
-            || self.visible.position(path).is_none()
+        if !self.lib.settings.round_notice {
+            // Off: the round starts over when turned on again.
+            self.round_seen.clear();
+            return;
+        }
+        if order == Order::Random || self.visible.len() < 2 || self.visible.position(path).is_none()
         {
             return;
         }
@@ -2780,6 +2813,7 @@ impl Viewer {
                 self.round_message = Some((
                     format!("All {n} images shown: a new round begins"),
                     Instant::now(),
+                    self.images_shown,
                 ));
                 self.tx.ctx.request_repaint();
             }
@@ -2840,16 +2874,30 @@ impl Viewer {
             return;
         };
         let mut done = false;
-        // Above the bar the button is on, not over its frame.
-        let top = ["toolbar", "grid_icon_bar", "group_bar"]
-            .into_iter()
-            .filter_map(|id| ctx.memory(|m| m.area_rect(Id::new(id))))
-            .chain(ctx.memory(|m| m.area_rect(Id::new(("grid_overflow", true)))))
-            .chain(ctx.memory(|m| m.area_rect(Id::new(("grid_overflow", false)))))
-            .chain(self.controls_rect)
-            .filter(|r| r.contains(button.center()))
-            .map(|r| r.top())
-            .fold(button.top(), f32::min);
+        // Just above the bar the button is on, not over its frame: only bars
+        // on screen now count (a hidden bar keeps its last place in memory).
+        let shown = |id: Id| {
+            [egui::Order::Middle, egui::Order::Foreground]
+                .into_iter()
+                .any(|order| {
+                    ctx.memory(|m| m.areas().visible_last_frame(&egui::LayerId::new(order, id)))
+                })
+                .then(|| ctx.memory(|m| m.area_rect(id)))
+                .flatten()
+        };
+        let top = [
+            Id::new("toolbar"),
+            Id::new("grid_icon_bar"),
+            Id::new("group_bar"),
+            Id::new(("grid_overflow", true)),
+            Id::new(("grid_overflow", false)),
+        ]
+        .into_iter()
+        .filter_map(shown)
+        .chain(self.controls_rect.filter(|_| self.on_grid_page()))
+        .filter(|r| r.contains(button.center()))
+        .map(|r| r.top())
+        .fold(button.top(), f32::min);
         let anchor = Pos2::new(button.center().x, top);
         // As wide as the longest entry.
         let font = egui::TextStyle::Button.resolve(&ctx.style());
@@ -2859,6 +2907,7 @@ impl Viewer {
             .favorite_folders
             .iter()
             .map(|f| f.label())
+            .map(|l| format!("🗀 {l}"))
             .chain([
                 "☆ Remove the open folder".into(),
                 "Manage in Settings…".into(),
@@ -2912,10 +2961,17 @@ impl Viewer {
                 if favorites.is_empty() {
                     ui.label(RichText::new("No favorite folders yet.").color(MUTED));
                 }
+                let style = self.lib.settings.favorite_style.clone();
                 for f in favorites {
                     let here = open.as_ref() == Some(&f.path);
+                    // Buttons, or plain "/name", or a folder icon and the name.
+                    let button = match style.as_str() {
+                        "text" => egui::Button::new(format!("/{}", f.label())).frame(false),
+                        "icon" => egui::Button::new(format!("🗀 {}", f.label())).frame(false),
+                        _ => egui::Button::new(f.label()),
+                    };
                     let r = ui
-                        .add_enabled(!self.busy, egui::Button::new(f.label()).selected(here))
+                        .add_enabled(!self.busy, button.selected(here))
                         .on_hover_text(f.path.display().to_string());
                     if self.hover.watch(r, false).clicked() {
                         self.open(f.path.clone());
@@ -3251,12 +3307,17 @@ impl Viewer {
                         ui.label(RichText::new("/").color(MUTED));
                         // Room is left for Info, ? and Settings at the right.
                         let width = (ui.available_width() - 240.).max(80.);
-                        ui.allocate_ui(Vec2::new(width, 20.), |ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(title).color(MUTED).size(12.))
-                                    .truncate(),
-                            );
-                        });
+                        // Centred on the NOIRVIEW line, like the "/" before it.
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(width, 20.),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(title).color(MUTED).size(12.))
+                                        .truncate(),
+                                );
+                            },
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(16.);
@@ -4084,32 +4145,41 @@ impl Viewer {
     }
     /// The round notice: size, colour and place from Settings → Interaction.
     fn draw_round_message(&mut self, ctx: &egui::Context) {
-        let Some((message, started)) = self.round_message.clone() else {
+        let Some((message, started, shown_at)) = self.round_message.clone() else {
             return;
         };
-        let left = crate::repaint::TOAST_LIFETIME.saturating_sub(started.elapsed());
-        if left.is_zero() {
+        let s = &self.lib.settings;
+        let left = Duration::from_secs_f32(s.round_notice_secs.clamp(0.5, 60.))
+            .saturating_sub(started.elapsed());
+        // Or gone once this many new images have been shown.
+        let enough = s.round_notice_images > 0
+            && self.images_shown.saturating_sub(shown_at) >= u64::from(s.round_notice_images);
+        if left.is_zero() || enough {
             self.round_message = None;
             return;
         }
         if self.image_only() {
             return;
         }
-        let s = &self.lib.settings;
         let (align, offset) = match s.round_notice_place.as_str() {
             "top" => (egui::Align2::CENTER_TOP, Vec2::new(0., 65.)),
             "bottom" => (egui::Align2::CENTER_BOTTOM, Vec2::new(0., -110.)),
             _ => (egui::Align2::CENTER_CENTER, Vec2::ZERO),
         };
         let c = s.round_notice_color;
-        let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+        let opacity = s.round_notice_opacity.clamp(0.05, 1.);
+        let color =
+            Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as f32 * opacity) as u8);
         let size = s.round_notice_size.clamp(10., 120.);
         egui::Area::new(Id::new("round_message"))
             .anchor(align, offset)
             .order(egui::Order::Tooltip)
             .interactable(false)
             .show(ctx, |ui| {
+                let fill = ui.visuals().window_fill;
                 egui::Frame::popup(ui.style())
+                    .fill(fill.gamma_multiply(opacity))
+                    .shadow(egui::epaint::Shadow::NONE)
                     .corner_radius(14.)
                     .inner_margin(size * 0.5)
                     .show(ui, |ui| {
@@ -6809,6 +6879,11 @@ impl Viewer {
                 );
                 if self.hover.icon(ui, Icon::Round, &text, on, true) {
                     self.lib.settings.round_notice = !on;
+                    if on {
+                        // Off: the count starts over.
+                        self.round_seen.clear();
+                        self.round_message = None;
+                    }
                     self.changed();
                 }
             }
@@ -7804,6 +7879,24 @@ impl Viewer {
                         10.0..=120.0,
                         "Notice text size",
                     );
+                    h.slider(
+                        ui,
+                        &mut s.round_notice_secs,
+                        0.5..=60.0,
+                        "Notice shown for (s)",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.round_notice_opacity,
+                        0.05..=1.0,
+                        "Notice opacity",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.round_notice_images,
+                        0..=50,
+                        "…or gone after this many new images (0 = only the time)",
+                    );
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Notice place");
                         for (value, label) in
@@ -7963,6 +8056,18 @@ impl Viewer {
                     }
                 });
                 ui.label(RichText::new("An empty name shows the folder's own name.").color(MUTED));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("In the list as");
+                    for (value, label) in [
+                        ("buttons", "buttons"),
+                        ("text", "/name"),
+                        ("icon", "🗀 name"),
+                    ] {
+                        if h.button(ui, label, s.favorite_style == value, true, false) {
+                            s.favorite_style = value.to_owned();
+                        }
+                    }
+                });
                 ui.separator();
                 ui.heading("Files & tags");
                 ui.label("Keywords are cached in a local SQLite index. Only new or changed images are read again; the open folder is watched for changes.");
@@ -8984,6 +9089,8 @@ if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
 ui.label(format!("All {n} images of the list have been shown. Browsing goes on with a new round."));
 if self.hover.button(ui,"OK",false,true,false){close=true;}},
             Dialog::Move(mut plan)=>{
+                // One width whatever the names: long ones are cut, not widening it.
+                ui.set_width(440.);
                 ui.heading(if plan.selected {
                     format!("Move {} selected images?", plan.sources.len())
                 } else {
@@ -9000,7 +9107,8 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                         }
                     );
                     // Long paths end in "…" instead of widening the dialog.
-                    ui.allocate_ui(Vec2::new(430., 20.), |ui| {
+                    let width = (ui.available_width() - 96.).max(120.);
+                    ui.allocate_ui(Vec2::new(width, 20.), |ui| {
                         ui.add(egui::Label::new(text).truncate())
                             .on_hover_text(dest.display().to_string());
                     });
@@ -9022,9 +9130,7 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                             let name = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
                             // Long original names end in "…" instead of widening the dialog.
                             let line = format!("{} — {}", name(&first.target), name(&last.target));
-                            ui.allocate_ui(Vec2::new(520., 20.), |ui| {
-                                ui.add(egui::Label::new(line.clone()).truncate()).on_hover_text(line);
-                            });
+                            ui.add(egui::Label::new(line.clone()).truncate()).on_hover_text(line);
                         }
                     }
                     Err(e) => {
@@ -10119,7 +10225,16 @@ impl eframe::App for Viewer {
             }
         }
     }
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.parent_window.is_none() {
+            use wgpu::rwh::{HasDisplayHandle as _, HasWindowHandle as _};
+            if let (Ok(w), Ok(d)) = (frame.window_handle(), frame.display_handle()) {
+                self.parent_window = Some(ParentWindow {
+                    window: w.as_raw(),
+                    display: d.as_raw(),
+                });
+            }
+        }
         if std::env::var_os("NOIRVIEW_FRAME_TRACE").is_some() {
             eprintln!("noirview frame");
         }
@@ -11037,7 +11152,7 @@ mod tests {
         assert!(v
             .round_message
             .as_ref()
-            .is_some_and(|(t, _)| t.starts_with("All 3 images")));
+            .is_some_and(|(t, _, _)| t.starts_with("All 3 images")));
         // A new round has begun with the image shown.
         assert_eq!(v.round_seen.len(), 1);
         // As a dialog; Random never counts; off never tells.
@@ -11058,6 +11173,49 @@ mod tests {
             v.count_round(p);
         }
         assert!(v.dialog.is_none());
+    }
+    #[test]
+    fn after_go_to_browsing_back_shows_the_previous_image_in_order() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 21);
+        v.lib.settings.order = crate::model::Order::Sequential;
+        v.navigate(true);
+        assert_eq!(v.current.as_deref(), Some(Path::new("/p/01.jpg")));
+        v.go_to(7);
+        v.navigate(false);
+        assert_eq!(
+            v.current.as_deref(),
+            Some(Path::new("/p/05.jpg")),
+            "6, not back to 1"
+        );
+        v.navigate(false);
+        assert_eq!(v.current.as_deref(), Some(Path::new("/p/04.jpg")));
+    }
+    #[test]
+    fn the_round_notice_goes_after_new_images_and_turning_it_off_starts_over() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 5);
+        v.lib.settings.order = crate::model::Order::Sequential;
+        v.lib.settings.round_notice_images = 2;
+        let files = v.files.clone();
+        for p in &files {
+            v.count_round(p);
+        }
+        assert!(v.round_message.is_some());
+        let frame = |v: &mut Viewer| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| v.draw_round_message(ctx));
+        };
+        v.count_round(&files[0]);
+        frame(&mut v);
+        assert!(v.round_message.is_some(), "one new image");
+        v.count_round(&files[1]);
+        frame(&mut v);
+        assert!(v.round_message.is_none(), "two new images");
+        // Turned off: what was seen is forgotten.
+        assert!(!v.round_seen.is_empty());
+        v.lib.settings.round_notice = false;
+        v.count_round(&files[2]);
+        assert!(v.round_seen.is_empty());
     }
     #[test]
     fn go_to_shows_an_image_or_a_page_and_grid_pages_can_wrap() {

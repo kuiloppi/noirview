@@ -378,6 +378,9 @@ pub struct Settings {
     pub confirm_restore: bool,
     /// Folders kept for quick opening (holding Open folder lists them).
     pub favorite_folders: Vec<FavoriteFolder>,
+    /// The favorites list: "buttons", "text" (/name) or "icon" (folder icon
+    /// and name).
+    pub favorite_style: String,
     /// In the image view with In order / Shuffle: say when every image of
     /// the list has been shown (a notice, or a dialog).
     pub round_notice: bool,
@@ -387,6 +390,11 @@ pub struct Settings {
     pub round_notice_size: f32,
     pub round_notice_color: [u8; 4],
     pub round_notice_place: String,
+    /// How long the round notice stays (seconds), its opacity, and after how
+    /// many new images it goes (0: only the time).
+    pub round_notice_secs: f32,
+    pub round_notice_opacity: f32,
+    pub round_notice_images: u32,
     /// Which way the pointer must move to close the hover preview: "any",
     /// "up", "down", "left" or "right".
     pub preview_close_move_dir: String,
@@ -560,11 +568,15 @@ impl Default for Settings {
             forget_deletion_on_close: false,
             confirm_restore: true,
             favorite_folders: vec![],
+            favorite_style: "buttons".into(),
             round_notice: true,
             round_notice_dialog: false,
             round_notice_size: 28.,
             round_notice_color: [235, 240, 236, 255],
             round_notice_place: "center".into(),
+            round_notice_secs: 3.,
+            round_notice_opacity: 0.9,
+            round_notice_images: 0,
             preview_close_move_dir: "any".into(),
             path_forward_slashes: false,
             image_title_folder: false,
@@ -961,14 +973,15 @@ impl Navigator {
         self.rebuild_pool(files);
     }
     /// An image shown without browsing (Go to, the grid's big image,
-    /// recently viewed): browsing goes on from it, as from a new visit.
+    /// recently viewed): browsing starts again from it in both directions
+    /// (In order: its neighbours, not the images browsed before the jump).
     pub fn jump(&mut self, files: &VisibleFiles, path: &Path) {
         if self.history.get(self.cursor).map(PathBuf::as_path) == Some(path) {
             return;
         }
-        self.history.truncate(self.cursor + 1);
+        self.history.clear();
         self.history.push_back(path.to_path_buf());
-        self.cursor = self.history.len() - 1;
+        self.cursor = 0;
         self.future.clear();
         self.past.clear();
         // (The shuffle pool covers the list once the view is built.)
@@ -1640,7 +1653,7 @@ mod tests {
             nav.next(&files, Some(&files[0]), Order::Sequential),
             Some(files[1].clone())
         );
-        // Image 7 shown with Go to: next is 8, back returns through 7 to 1.
+        // Image 7 shown with Go to: next is 8; back goes 8 → 7 → 6, not to 1.
         nav.jump(&files, &files[7]);
         assert_eq!(
             nav.next(&files, Some(&files[7]), Order::Sequential),
@@ -1652,11 +1665,17 @@ mod tests {
         );
         assert_eq!(
             nav.previous(&files, Some(&files[7]), Order::Sequential),
-            Some(files[1].clone())
+            Some(files[6].clone())
+        );
+        // Straight back after a jump: its neighbour too.
+        nav.jump(&files, &files[4]);
+        assert_eq!(
+            nav.previous(&files, Some(&files[4]), Order::Sequential),
+            Some(files[3].clone())
         );
         // Jumping to the image already at the cursor changes nothing.
         let before = nav.history_len();
-        nav.jump(&files, &files[1]);
+        nav.jump(&files, &files[3]);
         assert_eq!(nav.history_len(), before);
     }
     #[test]
