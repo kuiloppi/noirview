@@ -46,11 +46,24 @@ fn sequence_number(path: &Path, digits: usize) -> Option<u64> {
 /// `digits` digits continuing after the highest one already there (001.jpg,
 /// 002.jpg, …; past 999, 1000), or the original file names (`keep_names`; a
 /// name used twice in the batch gets " (2)", " (3)", …).
+#[cfg(test)]
 pub fn plan_with(
     files: &[PathBuf],
     dest: &Path,
     keep_names: bool,
     digits: usize,
+) -> Result<Vec<MoveItem>> {
+    plan_names(files, dest, keep_names, digits, false)
+}
+/// `plan_with`; `fill_gaps`: sequence names take the free numbers first
+/// (1.png and 3.png there: 2.png, then 4.png), not only those after the
+/// highest.
+pub fn plan_names(
+    files: &[PathBuf],
+    dest: &Path,
+    keep_names: bool,
+    digits: usize,
+    fill_gaps: bool,
 ) -> Result<Vec<MoveItem>> {
     let digits = digits.clamp(1, 8);
     ensure!(
@@ -60,6 +73,7 @@ pub fn plan_with(
     ensure!(dest.is_dir(), "The destination must be an existing folder");
     let dest = dest.canonicalize()?;
     let mut max = 0u64;
+    let mut taken = std::collections::HashSet::new();
     for e in fs::read_dir(&dest)? {
         let e = e?;
         if !e.file_type()?.is_file() {
@@ -67,11 +81,27 @@ pub fn plan_with(
         }
         if let Some(n) = sequence_number(&e.path(), digits) {
             max = max.max(n);
+            taken.insert(n);
         }
     }
+    // The numbers to use, in order: with `fill_gaps` the free ones first, then those
+    // after the highest.
+    let mut next = 0u64;
+    let mut number = || -> Result<u64> {
+        loop {
+            next = next.checked_add(1).context("Sequence overflow")?;
+            if !fill_gaps && next <= max {
+                next = max;
+                continue;
+            }
+            if taken.insert(next) {
+                return Ok(next);
+            }
+        }
+    };
     let mut items = vec![];
     let mut used = std::collections::HashSet::new();
-    for (i, source) in files.iter().enumerate() {
+    for source in files {
         ensure!(
             source
                 .parent()
@@ -92,7 +122,7 @@ pub fn plan_with(
             }
             target
         } else {
-            let n = max.checked_add(i as u64 + 1).context("Sequence overflow")?;
+            let n = number()?;
             dest.join(format!("{n:0digits$}.{ext}"))
         };
         items.push(MoveItem {
@@ -873,6 +903,42 @@ mod tests {
         assert_eq!(recover(d.path()).unwrap().len(), 1);
         assert!(!a.exists());
         assert_eq!(fs::read(crate::metadata::sidecar(&b)).unwrap(), b"tags");
+    }
+    #[test]
+    fn sequence_names_can_fill_the_free_numbers_first() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        for n in [1, 3, 4, 5, 6, 7] {
+            fs::write(dst.path().join(format!("{n}.png")), b"x").unwrap();
+        }
+        let files: Vec<PathBuf> = ["a.png", "b.jpg", "c.png"]
+            .iter()
+            .map(|n| {
+                let p = src.path().join(n);
+                fs::write(&p, b"y").unwrap();
+                p
+            })
+            .collect();
+        let names = |items: Vec<MoveItem>| -> Vec<String> {
+            items
+                .iter()
+                .map(|i| i.target.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            names(plan_names(&files, dst.path(), false, 1, true).unwrap()),
+            ["2.png", "8.jpg", "9.png"]
+        );
+        assert_eq!(
+            names(plan_names(&files, dst.path(), false, 1, false).unwrap()),
+            ["8.png", "9.jpg", "10.png"]
+        );
+        // An empty destination starts at 1 either way.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            names(plan_names(&files[..1], empty.path(), false, 3, true).unwrap()),
+            ["001.png"]
+        );
     }
     #[test]
     fn active_move_lock_blocks_recovery_and_releases_after_drop() {

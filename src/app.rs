@@ -238,8 +238,10 @@ struct MovePlan {
     keep_names: bool,
     /// Chosen images (Move selected) rather than the whole folder.
     selected: bool,
-    /// Sequence names' width (Settings → Library).
+    /// Sequence names' width, and whether free numbers come first
+    /// (Settings → Library).
     digits: usize,
+    fill_gaps: bool,
     /// The image shown (the floating Move button), or the images marked
     /// with it.
     one: bool,
@@ -252,13 +254,14 @@ impl MovePlan {
         keep_names: bool,
         selected: bool,
         dest: &Path,
-        digits: usize,
+        (digits, fill_gaps): (usize, bool),
     ) -> Self {
         let mut plan = Self {
             sources,
             keep_names,
             selected,
             digits,
+            fill_gaps,
             one: false,
             marked: false,
             items: Ok(vec![]),
@@ -267,8 +270,14 @@ impl MovePlan {
         plan
     }
     fn replan(&mut self, dest: &Path) {
-        self.items = operations::plan_with(&self.sources, dest, self.keep_names, self.digits)
-            .map_err(|e| format!("{e:#}"));
+        self.items = operations::plan_names(
+            &self.sources,
+            dest,
+            self.keep_names,
+            self.digits,
+            self.fill_gaps,
+        )
+        .map_err(|e| format!("{e:#}"));
     }
 }
 /// Where a hover-activated control is; each area has its own setting.
@@ -1618,8 +1627,11 @@ pub struct Viewer {
     move_float: bool,
     marking: bool,
     marked: Vec<PathBuf>,
-    /// The marked image shown larger in the Move dialog.
+    /// The marked image shown larger in the Move dialog; with the hover
+    /// preview, the thumbnail rested on and where the preview opened.
     move_preview: Option<PathBuf>,
+    move_hover: Option<(PathBuf, Instant)>,
+    move_preview_origin: Option<Pos2>,
     /// Where the image was drawn last frame (the mark goes at its corner).
     image_rect: Option<Rect>,
     dialog: Option<Dialog>,
@@ -1851,6 +1863,8 @@ impl Viewer {
             marking: false,
             marked: Vec::new(),
             move_preview: None,
+            move_hover: None,
+            move_preview_origin: None,
             image_rect: None,
             dialog: None,
             keyword_editor: None,
@@ -5441,16 +5455,19 @@ impl Viewer {
             self.changed();
         }
     }
-    /// The Move dialog's list of marked images: a thumbnail (a click shows it
-    /// larger above the list), the name and Remove. Returns the image taken
-    /// off the list.
+    /// The Move dialog's marked images: a list (thumbnail, name, Remove) or,
+    /// with `move_dialog_grid`, a grid of thumbnails with × at each one's
+    /// corner. A click on a thumbnail shows it larger in the dialog; with
+    /// `marked_preview_float` resting on one opens it like the grid's hover
+    /// preview. Returns the image taken off the list.
     fn marked_list(&mut self, ui: &mut egui::Ui, sources: &[PathBuf]) -> Option<PathBuf> {
-        let height = self.lib.settings.marked_thumb_px.clamp(24., 240.);
+        let s = self.lib.settings.clone();
+        let height = s.marked_thumb_px.clamp(24., 240.);
         let thumb = Vec2::new(height * 1.5, height);
-        let float = self.lib.settings.marked_preview_float;
+        let hover_mode = s.marked_preview_float;
         let mut remove = None;
-        let mut clicked_at = None;
-        if let Some(path) = self.move_preview.clone().filter(|_| !float) {
+        let mut hovered = None;
+        if let Some(path) = self.move_preview.clone().filter(|_| !hover_mode) {
             let (rect, response) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 260.), Sense::click());
             self.paint_preview(ui, rect, &path);
@@ -5462,109 +5479,247 @@ impl Viewer {
                 self.move_preview = None;
             }
         }
+        let max_height = if s.move_dialog_grid {
+            (ui.ctx().screen_rect().height() - 300.).max(160.)
+        } else {
+            240.
+        };
         egui::ScrollArea::vertical()
             .id_salt("marked_list")
-            .max_height(240.)
+            .max_height(max_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                for path in sources {
-                    let name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    ui.horizontal(|ui| {
-                        let (rect, response) = ui.allocate_exact_size(thumb, Sense::click());
-                        self.paint_thumb(ui, rect, path);
-                        let shown = self.move_preview.as_ref() == Some(path);
-                        if shown {
-                            clicked_at.get_or_insert(rect);
-                        }
-                        if shown {
-                            ui.painter().rect_stroke(
-                                rect,
-                                4.,
-                                Stroke::new(2.0_f32, MOVE_BLUE),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                        if self
-                            .hover
-                            .watch(response.on_hover_text("Show larger"), false)
-                            .clicked()
-                        {
-                            self.move_preview = if shown { None } else { Some(path.clone()) };
-                            clicked_at = Some(rect);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.hover.button(ui, "Remove", false, true, false) {
-                                remove = Some(path.clone());
+                if s.move_dialog_grid {
+                    let gap = 8.;
+                    let columns =
+                        (((ui.available_width() + gap) / (thumb.x + gap)).floor() as usize).max(1);
+                    for row in sources.chunks(columns) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for path in row {
+                                ui.vertical(|ui| {
+                                    ui.set_width(thumb.x);
+                                    let (r, h) =
+                                        self.marked_thumb(ui, path, thumb, true, hover_mode);
+                                    remove = remove.take().or(r);
+                                    hovered = hovered.take().or(h);
+                                    let name =
+                                        path.file_name().unwrap_or_default().to_string_lossy();
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(name).size(11.).color(MUTED),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(path.display().to_string());
+                                });
                             }
+                        });
+                        ui.add_space(gap);
+                    }
+                } else {
+                    for path in sources {
+                        let name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        ui.horizontal(|ui| {
+                            let (_, h) = self.marked_thumb(ui, path, thumb, false, hover_mode);
+                            hovered = hovered.take().or(h);
                             ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
+                                egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.add(egui::Label::new(&name).truncate())
-                                        .on_hover_text(path.display().to_string());
+                                    if self.hover.button(ui, "Remove", false, true, false) {
+                                        remove = Some(path.clone());
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(egui::Label::new(&name).truncate())
+                                                .on_hover_text(path.display().to_string());
+                                        },
+                                    );
                                 },
                             );
                         });
-                    });
+                    }
                 }
             });
-        // As a floating image beside the dialog, like the grid's preview.
-        if float {
-            if let (Some(path), Some(at)) = (self.move_preview.clone(), clicked_at) {
-                let screen = ui.ctx().screen_rect();
-                let dialog = ui.min_rect().union(ui.max_rect());
-                // Beside the dialog on the side with more room, smaller when
-                // the room is less than the size set, in the image's shape.
-                let left = dialog.left() - screen.left() - 40.;
-                let right = screen.right() - dialog.right() - 40.;
-                let room = left.max(right).max(120.);
-                let side = self
-                    .lib
-                    .settings
-                    .marked_preview_px
-                    .clamp(120., 1600.)
-                    .min(screen.height() - 40.);
-                let key = self.images.key(path.clone(), true);
-                let aspect = self
-                    .images
-                    .texture(&key)
-                    .map_or(1.5, |(_, d)| d[0] as f32 / d[1].max(1) as f32);
-                let size = if aspect >= 1. {
-                    Vec2::new(side, side / aspect)
-                } else {
-                    Vec2::new(side * aspect, side)
-                };
-                let size = size * (room / size.x).min(1.);
-                let (pivot, x) = if left >= right {
-                    (egui::Align2::RIGHT_CENTER, dialog.left() - 16.)
-                } else {
-                    (egui::Align2::LEFT_CENTER, dialog.right() + 16.)
-                };
-                let response = egui::Area::new(Id::new("marked_preview"))
-                    .pivot(pivot)
-                    .fixed_pos(Pos2::new(x, at.center().y))
-                    .constrain(true)
-                    .order(egui::Order::Foreground)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style())
-                            .corner_radius(10.)
-                            .inner_margin(6.)
-                            .show(ui, |ui| {
-                                let (rect, r) = ui.allocate_exact_size(size, Sense::click());
-                                self.paint_preview(ui, rect, &path);
-                                if r.on_hover_text("Close the preview").clicked() {
-                                    self.move_preview = None;
-                                }
-                            });
-                    })
-                    .response;
-                ui.ctx().move_to_top(response.layer_id);
-            }
+        if hover_mode {
+            self.marked_hover_preview(ui.ctx(), hovered);
         }
         remove
+    }
+    /// One marked image's thumbnail (with × at its corner in the grid
+    /// layout). Returns the image taken off and the one hovered.
+    fn marked_thumb(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &PathBuf,
+        size: Vec2,
+        corner_x: bool,
+        hover_mode: bool,
+    ) -> (Option<PathBuf>, Option<PathBuf>) {
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        self.paint_thumb(ui, rect, path);
+        let shown = self.move_preview.as_ref() == Some(path);
+        if shown {
+            ui.painter().rect_stroke(
+                rect,
+                4.,
+                Stroke::new(2.0_f32, MOVE_BLUE),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let mut removed = None;
+        let mut on_x = false;
+        if corner_x {
+            let x = Rect::from_center_size(rect.left_top() + Vec2::splat(12.), Vec2::splat(20.));
+            let r = ui
+                .interact(x, ui.id().with(("marked_x", path)), Sense::click())
+                .on_hover_text("Take off the list");
+            on_x = r.hovered();
+            let fill = if on_x {
+                RED
+            } else {
+                Color32::from_rgba_unmultiplied(20, 24, 30, 230)
+            };
+            ui.painter().circle_filled(x.center(), 10., fill);
+            ui.painter().circle_stroke(
+                x.center(),
+                10.,
+                Stroke::new(1.0_f32, Color32::from_white_alpha(140)),
+            );
+            ui.painter().text(
+                x.center(),
+                egui::Align2::CENTER_CENTER,
+                "×",
+                egui::FontId::proportional(14.),
+                Color32::WHITE,
+            );
+            if self.hover.watch(r, false).clicked() {
+                removed = Some(path.clone());
+            }
+        }
+        if hover_mode {
+            let hovered = (response.hovered() && !on_x).then(|| path.clone());
+            return (removed, hovered);
+        }
+        if removed.is_none()
+            && self
+                .hover
+                .watch(response.on_hover_text("Show larger"), false)
+                .clicked()
+        {
+            self.move_preview = if shown { None } else { Some(path.clone()) };
+        }
+        (removed, None)
+    }
+    /// The marked images' preview like the grid's hover preview: resting on
+    /// a thumbnail opens it over the window (the grid preview's size); moving
+    /// away as set for the grid, a click or Escape closes it.
+    fn marked_hover_preview(&mut self, ctx: &egui::Context, hovered: Option<PathBuf>) {
+        let s = self.lib.settings.clone();
+        if self.move_preview.is_none() {
+            match (hovered, &self.move_hover) {
+                (Some(p), Some((c, since))) if *c == p => {
+                    let delay = Duration::from_millis(s.hover_preview_ms);
+                    if since.elapsed() >= delay {
+                        self.move_preview = Some(p);
+                        self.move_preview_origin = ctx.pointer_hover_pos();
+                        self.move_hover = None;
+                    } else {
+                        ctx.request_repaint_after(delay - since.elapsed());
+                    }
+                }
+                (Some(p), _) => self.move_hover = Some((p, Instant::now())),
+                (None, _) => self.move_hover = None,
+            }
+        }
+        let Some(path) = self.move_preview.clone() else {
+            return;
+        };
+        let moved = s.preview_close_move_px > 0.
+            && ctx
+                .pointer_hover_pos()
+                .zip(self.move_preview_origin)
+                .is_some_and(|(p, at)| {
+                    let d = p - at;
+                    let travelled = match s.preview_close_move_dir.as_str() {
+                        "up" => -d.y,
+                        "down" => d.y,
+                        "left" => -d.x,
+                        "right" => d.x,
+                        _ => d.length(),
+                    };
+                    travelled > s.preview_close_move_px
+                });
+        if moved || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.move_preview = None;
+            self.move_preview_origin = None;
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let frame = Rect::from_center_size(
+            screen.center(),
+            screen.size() * (s.preview_size / 100.).clamp(0.4, 1.),
+        );
+        let response = egui::Area::new(Id::new("marked_hover_preview"))
+            .fixed_pos(frame.min)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, r) = ui.allocate_exact_size(frame.size(), Sense::click());
+                let painter = ui.painter();
+                painter.rect_filled(rect, 14., Color32::from_rgba_unmultiplied(8, 10, 14, 245));
+                painter.rect_stroke(
+                    rect,
+                    14.,
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(40)),
+                    egui::StrokeKind::Inside,
+                );
+                let inner = rect.shrink(14.);
+                let image_area = Rect::from_min_max(inner.min, inner.max - Vec2::new(0., 22.));
+                if let Some((texture, dim, _)) = self.images.display_texture(&path, true) {
+                    let factor = (image_area.width() / dim[0] as f32)
+                        .min(image_area.height() / dim[1] as f32);
+                    ui.painter().image(
+                        texture.id(),
+                        Rect::from_center_size(
+                            image_area.center(),
+                            Vec2::new(dim[0] as f32, dim[1] as f32) * factor,
+                        ),
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    self.paint_thumb(ui, image_area, &path);
+                }
+                ui.painter().text(
+                    Pos2::new(inner.center().x, inner.bottom() - 8.),
+                    egui::Align2::CENTER_CENTER,
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    egui::FontId::proportional(12.),
+                    MUTED,
+                );
+                r.clicked()
+            });
+        ctx.move_to_top(response.response.layer_id);
+        if response.inner {
+            self.move_preview = None;
+            self.move_preview_origin = None;
+        }
+    }
+    /// The Move dialog: a marked image taken off its list (and unmarked).
+    fn take_off_marked(&mut self, plan: &mut MovePlan, path: &Path) {
+        plan.sources.retain(|p| p != path);
+        self.marked.retain(|p| p != path);
+        if self.move_preview.as_deref() == Some(path) {
+            self.move_preview = None;
+        }
+        plan.replan(&self.lib.settings.destination);
+        self.dialog = Some(Dialog::Move(plan.clone()));
+        self.marks_changed(true);
     }
     /// An image's thumbnail fitted into `rect` (a spinner while it loads).
     fn paint_thumb(&mut self, ui: &mut egui::Ui, rect: Rect, path: &Path) {
@@ -6799,7 +6954,7 @@ impl Viewer {
             s.move_keep_names,
             false,
             &s.destination,
-            s.move_digits,
+            (s.move_digits, s.move_fill_gaps),
         );
         self.dialog = Some(Dialog::Move(plan));
     }
@@ -6822,7 +6977,7 @@ impl Viewer {
                 s.move_keep_names,
                 true,
                 &s.destination,
-                s.move_digits,
+                (s.move_digits, s.move_fill_gaps),
             );
             self.dialog = Some(Dialog::Move(plan));
         }
@@ -8071,7 +8226,7 @@ impl Viewer {
             s.move_keep_names,
             true,
             &s.destination,
-            s.move_digits,
+            (s.move_digits, s.move_fill_gaps),
         );
         plan.one = true;
         self.dialog = Some(Dialog::Move(plan));
@@ -8088,7 +8243,7 @@ impl Viewer {
             s.move_keep_names,
             true,
             &s.destination,
-            s.move_digits,
+            (s.move_digits, s.move_fill_gaps),
         );
         plan.marked = true;
         self.move_preview = None;
@@ -8825,16 +8980,14 @@ impl Viewer {
                 h.check(
                     ui,
                     &mut s.marked_preview_float,
-                    "Show a clicked thumbnail as a floating image (instead of in the dialog)",
+                    "Preview a thumbnail like the grid's hover preview (rest the pointer on it)",
                 );
-                ui.add_enabled_ui(s.marked_preview_float, |ui| {
-                    h.slider(
-                        ui,
-                        &mut s.marked_preview_px,
-                        120.0..=1600.0,
-                        "Floating image size (px)",
-                    );
-                });
+                ui.label(RichText::new("Off: a click on a thumbnail shows it larger in the dialog. On: the grid's hover preview settings (delay, size, closing on movement) apply; a click or Escape also closes it.").color(MUTED));
+                h.check(
+                    ui,
+                    &mut s.move_dialog_grid,
+                    "Move dialog: the marked images as a grid (the dialog grows with them)",
+                );
                 h.check(
                     ui,
                     &mut s.grid_move_marks,
@@ -9121,6 +9274,11 @@ impl Viewer {
                     "Keep the original file names when moving (default in the Move dialog)",
                 );
                 h.slider(ui, &mut s.move_digits, 1..=8, "Digits in sequence names");
+                h.check(
+                    ui,
+                    &mut s.move_fill_gaps,
+                    "Sequence names fill free numbers in the destination first",
+                );
                 let example = format!("{:0w$}", 1, w = s.move_digits.clamp(1, 8));
                 ui.label(RichText::new(format!("Without keeping the names they become {example}.ext and on (the format and extension stay intact), after the highest such number already in the destination; past the last number of that width it goes on with one digit more. Clashing original names get \" (2)\" and so on.")).color(MUTED));
                 ui.label("The move includes all images in the opened folder scope, even with an active filter.");
@@ -10331,7 +10489,16 @@ ui.label(format!("All {n} images of the list have been shown. Browsing goes on w
 if self.hover.button(ui,"OK",false,true,false){close=true;}},
             Dialog::Move(mut plan)=>{
                 // One width whatever the names: long ones are cut, not widening it.
-                ui.set_width(440.);
+                // The marked images as a grid: wider with more images.
+                let grid = plan.marked && self.lib.settings.move_dialog_grid;
+                ui.set_width(if grid {
+                    let cell = self.lib.settings.marked_thumb_px.clamp(24., 240.) * 1.5 + 8.;
+                    let n = plan.sources.len().max(1) as f32;
+                    let columns = (n * 1.6).sqrt().ceil().min(n);
+                    (columns * cell + 24.).clamp(440., ui.ctx().screen_rect().width() * 0.9)
+                } else {
+                    440.
+                });
                 ui.heading(if plan.one {
                     "Move this image?".to_owned()
                 } else if plan.marked {
@@ -10341,6 +10508,12 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                 } else {
                     "Move all folder images?".to_owned()
                 });
+                if grid {
+                    if let Some(remove) = self.marked_list(ui, &plan.sources) {
+                        self.take_off_marked(&mut plan, &remove);
+                    }
+                    ui.separator();
+                }
                 ui.horizontal(|ui| {
                     let dest = self.lib.settings.destination.clone();
                     let text = format!(
@@ -10380,15 +10553,9 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                     plan.replan(&self.lib.settings.destination);
                     self.dialog = Some(Dialog::Move(plan.clone()));
                 }
-                if plan.marked {
+                if plan.marked && !grid {
                     if let Some(remove) = self.marked_list(ui, &plan.sources) {
-                        plan.sources.retain(|p| *p != remove);
-                        self.marked.retain(|p| *p != remove);
-                        if self.move_preview.as_ref() == Some(&remove) {
-                            self.move_preview = None;
-                        }
-                        plan.replan(&self.lib.settings.destination);
-                        self.dialog = Some(Dialog::Move(plan.clone()));
+                        self.take_off_marked(&mut plan, &remove);
                     }
                 }
                 match &plan.items {
@@ -13265,6 +13432,32 @@ mod tests {
             "the group waits for the popup"
         );
         assert!(v.popup.is_some());
+    }
+    #[test]
+    fn marked_thumbnails_preview_like_the_grid_and_leave_the_list() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 4);
+        let files = v.files.clone();
+        v.marking = true;
+        for p in &files[..3] {
+            v.toggle_mark(p);
+        }
+        v.open_marked_move();
+        // Resting on a thumbnail for the grid's delay opens the preview.
+        v.lib.settings.hover_preview_ms = 0;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            v.marked_hover_preview(ctx, Some(files[1].clone()));
+            v.marked_hover_preview(ctx, Some(files[1].clone()));
+        });
+        assert_eq!(v.move_preview.as_ref(), Some(&files[1]));
+        // Taken off the list: unmarked, the plan made again, no preview.
+        let Some(Dialog::Move(mut plan)) = v.dialog.clone() else {
+            panic!("no Move dialog");
+        };
+        v.take_off_marked(&mut plan, &files[1]);
+        assert_eq!(plan.sources, vec![files[0].clone(), files[2].clone()]);
+        assert_eq!(v.marked, vec![files[0].clone(), files[2].clone()]);
+        assert!(v.move_preview.is_none());
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {

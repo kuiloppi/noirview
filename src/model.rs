@@ -273,6 +273,8 @@ pub struct Settings {
     pub move_keep_names: bool,
     /// Width of the sequence names of moved images (001.jpg).
     pub move_digits: usize,
+    /// Sequence names take the destination's free numbers first.
+    pub move_fill_gaps: bool,
     /// Open the grid at the page of the image shown in the image view.
     pub grid_open_at_current: bool,
     /// The grid and the image view keep their own filter (off: one filter).
@@ -418,12 +420,14 @@ pub struct Settings {
     /// The floating Move button (single image view): its place and colour.
     pub move_pos: Option<[f32; 2]>,
     pub move_color: [u8; 4],
-    /// The Move dialog's list of marked images: thumbnail height; a click
-    /// on one shows it larger in the dialog, or as a floating image of
-    /// this size.
+    /// The Move dialog's marked images: thumbnail height; a click on one
+    /// shows it larger in the dialog, or resting on one opens it like the
+    /// grid's hover preview.
     pub marked_thumb_px: f32,
     pub marked_preview_float: bool,
-    pub marked_preview_px: f32,
+    /// The Move dialog shows the marked images as a grid above its
+    /// controls, larger with more images.
+    pub move_dialog_grid: bool,
     /// Images marked to move show their mark on the grid's tiles too.
     pub grid_move_marks: bool,
     /// Favorite folders open where browsing left them (kept per profile).
@@ -582,6 +586,7 @@ impl Default for Settings {
             bar_buttons: BTreeMap::new(),
             move_keep_names: false,
             move_digits: 3,
+            move_fill_gaps: false,
             grid_open_at_current: false,
             filter_per_view: true,
             grid_random_both: false,
@@ -622,7 +627,7 @@ impl Default for Settings {
             move_color: [38, 84, 150, 235],
             marked_thumb_px: 48.,
             marked_preview_float: false,
-            marked_preview_px: 420.,
+            move_dialog_grid: false,
             grid_move_marks: true,
             remember_favorite_places: false,
             favorite_places: BTreeMap::new(),
