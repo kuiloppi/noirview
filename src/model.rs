@@ -418,6 +418,14 @@ pub struct Settings {
     /// The floating Move button (single image view): its place and colour.
     pub move_pos: Option<[f32; 2]>,
     pub move_color: [u8; 4],
+    /// The Move dialog's list of marked images: thumbnail height; a click
+    /// on one shows it larger in the dialog, or as a floating image of
+    /// this size.
+    pub marked_thumb_px: f32,
+    pub marked_preview_float: bool,
+    pub marked_preview_px: f32,
+    /// Images marked to move show their mark on the grid's tiles too.
+    pub grid_move_marks: bool,
     /// Favorite folders open where browsing left them (kept per profile).
     pub remember_favorite_places: bool,
     /// Where browsing was in each favorite folder, per profile (key: the
@@ -612,6 +620,10 @@ impl Default for Settings {
             active_profile: String::new(),
             move_pos: None,
             move_color: [38, 84, 150, 235],
+            marked_thumb_px: 48.,
+            marked_preview_float: false,
+            marked_preview_px: 420.,
+            grid_move_marks: true,
             remember_favorite_places: false,
             favorite_places: BTreeMap::new(),
             grid_page_wrap: false,
@@ -1003,10 +1015,20 @@ pub struct Filter {
     pub mode: FilterMode,
     pub favorite: bool,
     pub elite: bool,
+    /// Only the images marked to move (single view), and / or those chosen
+    /// in the grid's Move selected mode.
+    pub marked: bool,
+    pub chosen: bool,
+    /// The images `marked` / `chosen` allow, filled in when a view is built.
+    pub allowed: Option<std::sync::Arc<std::collections::HashSet<PathBuf>>>,
 }
 impl Filter {
     pub fn active(&self) -> bool {
-        !self.tags.is_empty() || self.favorite || self.elite
+        !self.tags.is_empty() || self.favorite || self.elite || self.marked || self.chosen
+    }
+    /// `matches`, and among the images `marked` / `chosen` allow.
+    pub fn matches_path(&self, path: &Path, m: &PhotoMeta) -> bool {
+        self.allowed.as_ref().is_none_or(|a| a.contains(path)) && self.matches(m)
     }
     /// Gives the same images as `other` (both off counts as the same).
     pub fn matches_same(&self, other: &Filter) -> bool {
@@ -1014,7 +1036,9 @@ impl Filter {
             || (self.tags == other.tags
                 && self.mode == other.mode
                 && self.favorite == other.favorite
-                && self.elite == other.elite)
+                && self.elite == other.elite
+                && self.marked == other.marked
+                && self.chosen == other.chosen)
     }
     pub fn matches(&self, m: &PhotoMeta) -> bool {
         let tags = self.tags.is_empty()

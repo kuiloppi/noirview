@@ -54,7 +54,7 @@ impl ViewBuild {
                 if let Some(path) = files.get(self.cursor) {
                     if self
                         .filter
-                        .matches(photos.get(path).unwrap_or(&PhotoMeta::default()))
+                        .matches_path(path, photos.get(path).unwrap_or(&PhotoMeta::default()))
                     {
                         let i = self.visible.paths.len();
                         self.visible.positions.insert(path.clone(), i);

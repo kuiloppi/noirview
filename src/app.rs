@@ -1536,6 +1536,8 @@ pub struct Viewer {
     backend_checked: bool,
     /// The settings as they were when the Settings window opened (Cancel).
     settings_snapshot: Option<Box<Settings>>,
+    /// Where the button popup was drawn last frame.
+    popup_rect: Option<Rect>,
     /// A profile to switch to (Settings or the right-click menu).
     pending_profile: Option<String>,
     /// Naming a profile: the one renamed (none: a new one) and the text.
@@ -1797,6 +1799,7 @@ impl Viewer {
             previous_image: None,
             backend_checked: false,
             settings_snapshot: None,
+            popup_rect: None,
             pending_profile: None,
             profile_edit: None,
             favorite_anchor: None,
@@ -2247,6 +2250,28 @@ impl Viewer {
             }
         }
     }
+    /// The images the Marked / Selected to move filters allow (both on:
+    /// those in both).
+    fn filter_paths(&self) -> Option<std::sync::Arc<HashSet<PathBuf>>> {
+        let marked = || self.marked.iter().cloned().collect::<HashSet<_>>();
+        let set = match (self.filter.marked, self.filter.chosen) {
+            (false, false) => return None,
+            (true, false) => marked(),
+            (false, true) => self.move_selection.clone(),
+            (true, true) => marked()
+                .into_iter()
+                .filter(|p| self.move_selection.contains(p))
+                .collect(),
+        };
+        Some(std::sync::Arc::new(set))
+    }
+    /// The marks or the grid's Move selection changed: a filter by them
+    /// shows the change.
+    fn marks_changed(&mut self, marks: bool) {
+        if (marks && self.filter.marked) || (!marks && self.filter.chosen) {
+            self.schedule_view(false);
+        }
+    }
     fn rebuild(&mut self) {
         // A new folder/filter/list: pages built before it no longer apply.
         self.grid_ghosts = None;
@@ -2270,8 +2295,10 @@ impl Viewer {
             if let Some(old) = self.view_build.take() {
                 self.retire.retire(old);
             }
+            let mut filter = self.filter.clone();
+            filter.allowed = self.filter_paths();
             self.view_build = Some(ViewBuild::new(
-                self.filter.clone(),
+                filter,
                 self.view_reset,
                 self.current.clone(),
                 self.view_fallback,
@@ -3469,8 +3496,28 @@ impl Viewer {
                         .interact_pos()
                         .is_some_and(|p| !rect.contains(p) && !button.contains(p))
         });
+        self.popup_rect = Some(rect);
         if done || elsewhere {
             self.popup = None;
+            self.popup_rect = None;
+        }
+        if done {
+            // Chosen from a button in a group bar: the group bar closes with
+            // the popup, in the same frame (not first the group, then the
+            // popup sliding down to the bar).
+            let inside = |id: Id| {
+                ctx.memory(|m| m.area_rect(id))
+                    .is_some_and(|r| r.contains(button.center()))
+            };
+            if self.group_open.is_some() && inside(Id::new("group_bar")) {
+                self.group_open = None;
+            }
+            if self.grid_overflow
+                && (inside(Id::new(("grid_overflow", true)))
+                    || inside(Id::new(("grid_overflow", false))))
+            {
+                self.grid_overflow = false;
+            }
         }
     }
     fn backup(&mut self, slot: Option<String>) {
@@ -3973,9 +4020,11 @@ impl Viewer {
             self.image_rect = Some(rect.intersect(area));
             // Marked to move: a mark at the image's top-left corner.
             if self.marking && !self.grid && self.marked.contains(&path) {
+                // At the image's corner, below the title line.
+                let corner = rect.intersect(area).left_top() + Vec2::splat(14.);
                 paint_move_mark(
                     ui.painter(),
-                    rect.intersect(area).left_top() + Vec2::splat(14.),
+                    Pos2::new(corner.x, corner.y.max(area.top() + 44.)),
                 );
             }
             let response = ui.interact(
@@ -4336,6 +4385,11 @@ impl Viewer {
                     self.copy_flash = None;
                 }
             }
+            // Marked to move in the single view: the same mark (it changes
+            // nothing in the grid).
+            if self.lib.settings.grid_move_marks && self.marked.contains(path) {
+                paint_move_mark(&painter, image_rect.left_top() + Vec2::splat(8.));
+            }
             if deleting || tagging || moving {
                 let color = if deleting {
                     RED
@@ -4371,8 +4425,11 @@ impl Viewer {
                 if self.move_mode {
                     if deleting {
                         self.notify("Cannot move this image: it is marked for deletion");
-                    } else if !self.move_selection.insert(path.clone()) {
-                        self.move_selection.remove(path);
+                    } else {
+                        if !self.move_selection.insert(path.clone()) {
+                            self.move_selection.remove(path);
+                        }
+                        self.marks_changed(false);
                     }
                 } else if self.tag_mode {
                     if deleting {
@@ -5388,12 +5445,15 @@ impl Viewer {
     /// larger above the list), the name and Remove. Returns the image taken
     /// off the list.
     fn marked_list(&mut self, ui: &mut egui::Ui, sources: &[PathBuf]) -> Option<PathBuf> {
-        const THUMB: Vec2 = Vec2::new(72., 48.);
+        let height = self.lib.settings.marked_thumb_px.clamp(24., 240.);
+        let thumb = Vec2::new(height * 1.5, height);
+        let float = self.lib.settings.marked_preview_float;
         let mut remove = None;
-        if let Some(path) = self.move_preview.clone() {
+        let mut clicked_at = None;
+        if let Some(path) = self.move_preview.clone().filter(|_| !float) {
             let (rect, response) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 260.), Sense::click());
-            self.paint_thumb(ui, rect, &path);
+            self.paint_preview(ui, rect, &path);
             if self
                 .hover
                 .watch(response.on_hover_text("Close the preview"), false)
@@ -5414,9 +5474,12 @@ impl Viewer {
                         .to_string_lossy()
                         .into_owned();
                     ui.horizontal(|ui| {
-                        let (rect, response) = ui.allocate_exact_size(THUMB, Sense::click());
+                        let (rect, response) = ui.allocate_exact_size(thumb, Sense::click());
                         self.paint_thumb(ui, rect, path);
                         let shown = self.move_preview.as_ref() == Some(path);
+                        if shown {
+                            clicked_at.get_or_insert(rect);
+                        }
                         if shown {
                             ui.painter().rect_stroke(
                                 rect,
@@ -5431,6 +5494,7 @@ impl Viewer {
                             .clicked()
                         {
                             self.move_preview = if shown { None } else { Some(path.clone()) };
+                            clicked_at = Some(rect);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if self.hover.button(ui, "Remove", false, true, false) {
@@ -5447,14 +5511,77 @@ impl Viewer {
                     });
                 }
             });
+        // As a floating image beside the dialog, like the grid's preview.
+        if float {
+            if let (Some(path), Some(at)) = (self.move_preview.clone(), clicked_at) {
+                let screen = ui.ctx().screen_rect();
+                let dialog = ui.min_rect().union(ui.max_rect());
+                // Beside the dialog on the side with more room, smaller when
+                // the room is less than the size set, in the image's shape.
+                let left = dialog.left() - screen.left() - 40.;
+                let right = screen.right() - dialog.right() - 40.;
+                let room = left.max(right).max(120.);
+                let side = self
+                    .lib
+                    .settings
+                    .marked_preview_px
+                    .clamp(120., 1600.)
+                    .min(screen.height() - 40.);
+                let key = self.images.key(path.clone(), true);
+                let aspect = self
+                    .images
+                    .texture(&key)
+                    .map_or(1.5, |(_, d)| d[0] as f32 / d[1].max(1) as f32);
+                let size = if aspect >= 1. {
+                    Vec2::new(side, side / aspect)
+                } else {
+                    Vec2::new(side * aspect, side)
+                };
+                let size = size * (room / size.x).min(1.);
+                let (pivot, x) = if left >= right {
+                    (egui::Align2::RIGHT_CENTER, dialog.left() - 16.)
+                } else {
+                    (egui::Align2::LEFT_CENTER, dialog.right() + 16.)
+                };
+                let response = egui::Area::new(Id::new("marked_preview"))
+                    .pivot(pivot)
+                    .fixed_pos(Pos2::new(x, at.center().y))
+                    .constrain(true)
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style())
+                            .corner_radius(10.)
+                            .inner_margin(6.)
+                            .show(ui, |ui| {
+                                let (rect, r) = ui.allocate_exact_size(size, Sense::click());
+                                self.paint_preview(ui, rect, &path);
+                                if r.on_hover_text("Close the preview").clicked() {
+                                    self.move_preview = None;
+                                }
+                            });
+                    })
+                    .response;
+                ui.ctx().move_to_top(response.layer_id);
+            }
+        }
         remove
     }
     /// An image's thumbnail fitted into `rect` (a spinner while it loads).
     fn paint_thumb(&mut self, ui: &mut egui::Ui, rect: Rect, path: &Path) {
+        self.paint_image_in(ui, rect, path, false);
+    }
+    /// The whole image once loaded (the thumbnail until then).
+    fn paint_preview(&mut self, ui: &mut egui::Ui, rect: Rect, path: &Path) {
+        self.paint_image_in(ui, rect, path, true);
+    }
+    fn paint_image_in(&mut self, ui: &mut egui::Ui, rect: Rect, path: &Path, full: bool) {
         ui.painter()
             .rect_filled(rect, 4., Color32::from_rgb(21, 26, 33));
+        let full = full
+            .then(|| self.images.key(path.to_path_buf(), false))
+            .and_then(|k| self.images.texture(&k));
         let key = self.images.key(path.to_path_buf(), true);
-        if let Some((texture, dim)) = self.images.texture(&key) {
+        if let Some((texture, dim)) = full.or_else(|| self.images.texture(&key)) {
             let size = Vec2::new(dim[0] as f32, dim[1] as f32);
             let scale = (rect.width() / size.x).min(rect.height() / size.y);
             ui.painter().image(
@@ -6002,11 +6129,14 @@ impl Viewer {
                 ctx.move_to_top(response.layer_id);
                 // A press elsewhere closes it (not one inside, e.g. a menu).
                 let menu = response.rect;
+                let popup = self.popup_rect.filter(|_| self.popup.is_some());
                 let elsewhere = ctx.input(|i| {
                     i.pointer.any_pressed()
-                        && i.pointer
-                            .interact_pos()
-                            .is_some_and(|p| !menu.contains(p) && !button.contains(p))
+                        && i.pointer.interact_pos().is_some_and(|p| {
+                            !menu.contains(p)
+                                && !button.contains(p)
+                                && !popup.is_some_and(|r| r.contains(p))
+                        })
                 });
                 if elsewhere && self.grid_menu.is_none() && self.clear_menu.is_none() {
                     self.grid_overflow = false;
@@ -6729,6 +6859,7 @@ impl Viewer {
             }
         } else {
             self.move_selection.clear();
+            self.marks_changed(false);
         }
     }
     /// The Filter control: clears an active filter, otherwise opens the
@@ -7588,11 +7719,14 @@ impl Viewer {
             })
             .response;
         let group = response.rect;
+        // A press in a popup opened from the group (Profiles, Go to, …)
+        // leaves the group to close with that popup.
+        let popup = self.popup_rect.filter(|_| self.popup.is_some());
         let elsewhere = ctx.input(|i| {
             i.pointer.any_pressed()
-                && i.pointer
-                    .interact_pos()
-                    .is_some_and(|p| !group.contains(p) && !bar.contains(p))
+                && i.pointer.interact_pos().is_some_and(|p| {
+                    !group.contains(p) && !bar.contains(p) && !popup.is_some_and(|r| r.contains(p))
+                })
         });
         if elsewhere {
             self.group_open = None;
@@ -7752,6 +7886,24 @@ impl Viewer {
                                         {
                                             f.elite = !f.elite;
                                         }
+                                        // The images marked to move (single
+                                        // view), and in the grid those
+                                        // chosen to move.
+                                        if self.hover.button(ui, "✔ Marked", f.marked, true, false)
+                                        {
+                                            f.marked = !f.marked;
+                                        }
+                                        if self.grid
+                                            && self.hover.button(
+                                                ui,
+                                                "➡ Selected to move",
+                                                f.chosen,
+                                                true,
+                                                false,
+                                            )
+                                        {
+                                            f.chosen = !f.chosen;
+                                        }
                                         if self.hover.button(ui, "Apply filter", false, true, false)
                                         {
                                             self.filter = self.draft_filter.clone();
@@ -7904,8 +8056,12 @@ impl Viewer {
     }
     fn stop_marking(&mut self) {
         self.marking = false;
+        let had = !self.marked.is_empty();
         self.marked.clear();
         self.move_preview = None;
+        if had {
+            self.marks_changed(true);
+        }
     }
     /// The Move dialog for the image shown.
     fn open_one_move(&mut self, path: PathBuf) {
@@ -7945,6 +8101,7 @@ impl Viewer {
         } else {
             self.marked.push(path.to_path_buf());
         }
+        self.marks_changed(true);
     }
     /// The floating Move button over the single image: moves the image shown
     /// (a Move dialog), or while marking marks it.
@@ -8656,6 +8813,41 @@ impl Viewer {
                     "Forget the last deletion when NoirView closes",
                 );
                 ui.label(RichText::new("Restore deleted (toolbar, grid bar, right-click menu, Ctrl+Z) moves the last deleted images back from the Recycle Bin and shows the first one. Off: it also works after a restart.").color(MUTED));
+                ui.separator();
+                ui.heading("Floating Move button");
+                ui.label(RichText::new("Single image view. Its toolbar button: a click shows the floating Move button (moves the image shown); holding starts marking images to move, and while marking a click opens the Move dialog for them.").color(MUTED));
+                h.slider(
+                    ui,
+                    &mut s.marked_thumb_px,
+                    24.0..=240.0,
+                    "Thumbnail height in the Move dialog (px)",
+                );
+                h.check(
+                    ui,
+                    &mut s.marked_preview_float,
+                    "Show a clicked thumbnail as a floating image (instead of in the dialog)",
+                );
+                ui.add_enabled_ui(s.marked_preview_float, |ui| {
+                    h.slider(
+                        ui,
+                        &mut s.marked_preview_px,
+                        120.0..=1600.0,
+                        "Floating image size (px)",
+                    );
+                });
+                h.check(
+                    ui,
+                    &mut s.grid_move_marks,
+                    "Show the marks on the grid's thumbnails too",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Button colour");
+                    let c = s.move_color;
+                    let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    if ui.color_edit_button_srgba(&mut color).changed() {
+                        s.move_color = color.to_srgba_unmultiplied();
+                    }
+                });
                 ui.separator();
                 ui.heading("Browsing");
                 order_controls(ui, h, &mut s.order, "browse_order");
@@ -10205,7 +10397,12 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                         if let (Some(first), Some(last)) = (items.first(), items.last()) {
                             let name = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
                             // Long original names end in "…" instead of widening the dialog.
-                            let line = format!("{} — {}", name(&first.target), name(&last.target));
+                            // One image: its name once.
+                            let line = if items.len() == 1 {
+                                name(&first.target)
+                            } else {
+                                format!("{} — {}", name(&first.target), name(&last.target))
+                            };
                             ui.add(egui::Label::new(line.clone()).truncate()).on_hover_text(line);
                         }
                     }
@@ -10228,6 +10425,7 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                             } else if plan.selected && !plan.one {
                                 self.move_mode = false;
                                 self.move_selection.clear();
+                                self.marks_changed(false);
                             }
                             if operations::conflicts(&items) {
                                 self.dialog = Some(Dialog::Conflict(items));
@@ -11018,6 +11216,9 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         if let Some(Dialog::Move(plan)) = &self.dialog {
             if plan.marked {
                 let marked = plan.sources.clone();
+                if let Some(p) = &self.move_preview {
+                    high.push(self.images.key(p.clone(), false));
+                }
                 high.extend(marked.into_iter().map(|p| self.images.key(p, true)));
             }
         }
@@ -12991,6 +13192,79 @@ mod tests {
         };
         assert!(show(Pos2::new(400., 500.)).bottom() <= 500.);
         assert!(show(Pos2::new(400., 40.)).top() >= 60.);
+    }
+    #[test]
+    fn the_marked_and_selected_to_move_filters_show_only_those_images() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 6);
+        let files = v.files.clone();
+        v.toggle_mark(&files[1]);
+        v.toggle_mark(&files[4]);
+        v.filter.marked = true;
+        v.rebuild();
+        finish_view(&mut v, &ctx);
+        assert_eq!(&*v.visible, &[files[1].clone(), files[4].clone()]);
+        // A mark taken off while the filter is on leaves the view.
+        v.toggle_mark(&files[4]);
+        finish_view(&mut v, &ctx);
+        assert_eq!(&*v.visible, &[files[1].clone()]);
+        // The grid's Move selection, and both together.
+        v.filter.marked = false;
+        v.filter.chosen = true;
+        v.move_selection = [files[1].clone(), files[2].clone()].into_iter().collect();
+        v.rebuild();
+        finish_view(&mut v, &ctx);
+        assert_eq!(&*v.visible, &[files[1].clone(), files[2].clone()]);
+        v.filter.marked = true;
+        v.rebuild();
+        finish_view(&mut v, &ctx);
+        assert_eq!(&*v.visible, &[files[1].clone()]);
+        assert!(v.filter.active());
+    }
+    #[test]
+    fn a_press_in_a_popup_from_the_group_bar_keeps_the_group_open() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        v.bar = true;
+        v.group_open = Some("toolbar");
+        let frame = |v: &mut Viewer, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280., 820.))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                v.toolbar(ctx);
+                v.button_popups(ctx, false);
+            });
+        };
+        frame(&mut v, vec![]);
+        frame(&mut v, vec![]);
+        let group = ctx.memory(|m| m.area_rect(Id::new("group_bar"))).unwrap();
+        // The Profile button is the group's last.
+        let button =
+            Rect::from_center_size(group.right_center() - Vec2::new(30., 0.), Vec2::splat(30.));
+        v.toggle_profiles_popup(button);
+        frame(&mut v, vec![]);
+        frame(&mut v, vec![]);
+        let popup = v.popup_rect.unwrap();
+        let at = Pos2::new(popup.center().x, popup.top() + 8.);
+        frame(&mut v, vec![egui::Event::PointerMoved(at)]);
+        frame(
+            &mut v,
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(
+            v.group_open,
+            Some("toolbar"),
+            "the group waits for the popup"
+        );
+        assert!(v.popup.is_some());
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {

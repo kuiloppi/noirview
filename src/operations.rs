@@ -315,17 +315,35 @@ pub fn move_batch(mut items: Vec<MoveItem>, verify: bool, policy: Conflict) -> M
     }
     report
 }
+/// A destination folder's move lock: held while files are moved or
+/// recovered there; the lock file is removed afterwards.
+struct FolderLock {
+    file: Option<fs::File>,
+    path: PathBuf,
+}
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        // Closing releases the lock; another instance may have taken it
+        // meanwhile, so a failed removal is fine.
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
 /// Explicit recovery checks content before completing an interrupted move.
-fn folder_lock(folder: &Path) -> Result<fs::File> {
+fn folder_lock(folder: &Path) -> Result<FolderLock> {
+    let path = folder.join(".noirview-move.lock");
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(folder.join(".noirview-move.lock"))?;
+        .open(&path)?;
     file.try_lock_exclusive()
         .context("Another NoirView instance is moving or recovering files in this folder")?;
-    Ok(file)
+    Ok(FolderLock {
+        file: Some(file),
+        path,
+    })
 }
 pub fn recover(folder: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
     let _lock = folder_lock(folder)?;
@@ -883,6 +901,10 @@ mod tests {
         );
         assert!(report.error.is_none());
         assert_eq!(report.moved[0].1.file_name().unwrap(), "00000010.jpg");
+        assert!(
+            !d.path().join(".noirview-move.lock").exists(),
+            "the lock file goes after the move"
+        );
         assert_eq!(fs::read(target).unwrap(), b"existing");
     }
     #[test]
