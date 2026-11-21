@@ -41,6 +41,10 @@ pub enum Icon {
     Round,
     /// Go to image / page 1: an arrow to a bar.
     GoTo,
+    /// Profiles: a head and shoulders.
+    Profile,
+    /// The floating Move button (single image): a circle with an arrow.
+    FloatingMove,
 }
 pub fn paint(p: &egui::Painter, center: Pos2, icon: Icon, color: Color32) {
     let s = Stroke::new(1.7_f32, color);
@@ -75,6 +79,21 @@ pub fn paint(p: &egui::Painter, center: Pos2, icon: Icon, color: Color32) {
                 .collect();
             p.add(egui::Shape::line(points, s));
             path(&[(-4., 0.), (-1., 3.), (4., -3.)], false);
+        }
+        Icon::Profile => {
+            p.circle_stroke(pt(0., -4.), 4., s);
+            let points: Vec<_> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (1. + i as f32 / 16.);
+                    pt(0., 9.) + Vec2::new(a.cos() * 8., a.sin() * 6.)
+                })
+                .collect();
+            p.add(egui::Shape::line(points, s));
+        }
+        Icon::FloatingMove => {
+            p.circle_stroke(center, 10., s);
+            line((-5., 0.), (5., 0.));
+            path(&[(1., -4.), (5., 0.), (1., 4.)], false);
         }
         Icon::GoTo => {
             line((-7., -7.), (-7., 7.));

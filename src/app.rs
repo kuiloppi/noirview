@@ -25,6 +25,8 @@ const RED: Color32 = Color32::from_rgb(243, 101, 121);
 const HEART_RED: Color32 = Color32::from_rgb(235, 70, 80);
 /// Move selected mode: the Move button's mark and the chosen tiles' borders.
 const MOVE_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
+/// The profile choice for no profile in use.
+const NO_PROFILE: &str = "None";
 const TAG_YELLOW: Color32 = Color32::from_rgb(245, 202, 83);
 const MUTED: Color32 = Color32::from_rgb(130, 142, 156);
 #[derive(Clone)]
@@ -203,6 +205,10 @@ enum Popup {
     Favorites,
     /// Go to held: an image or page number.
     GoTo,
+    /// The Move dialog's Favourites: a favorite folder as the destination.
+    Destination,
+    /// The Profile button: the profiles as text.
+    Profiles,
 }
 #[derive(Clone)]
 enum Dialog {
@@ -234,6 +240,10 @@ struct MovePlan {
     selected: bool,
     /// Sequence names' width (Settings → Library).
     digits: usize,
+    /// The image shown (the floating Move button), or the images marked
+    /// with it.
+    one: bool,
+    marked: bool,
     items: Result<Vec<MoveItem>, String>,
 }
 impl MovePlan {
@@ -249,6 +259,8 @@ impl MovePlan {
             keep_names,
             selected,
             digits,
+            one: false,
+            marked: false,
             items: Ok(vec![]),
         };
         plan.replan(dest);
@@ -269,6 +281,8 @@ enum HoverArea {
     Trash,
     /// The Settings window (`Settings::hover_settings`).
     Settings,
+    /// The floating Move button (`Settings::hover_move`).
+    Move,
 }
 #[derive(Default)]
 struct Hover {
@@ -280,6 +294,7 @@ struct Hover {
     general: bool,
     trash: bool,
     settings: bool,
+    moving: bool,
     /// Area of controls registered with `watch`.
     area: HoverArea,
     /// Draw the green ring that fills up before a control activates.
@@ -293,7 +308,8 @@ impl Hover {
         self.general = s.hover;
         self.trash = s.hover_trash();
         self.settings = s.hover_settings();
-        self.enabled = self.general || self.trash || self.settings;
+        self.moving = s.hover_move();
+        self.enabled = self.general || self.trash || self.settings || self.moving;
         self.area = HoverArea::General;
         self.ring = s.hover_ring;
         self.normal = Duration::from_millis(s.hover_ms);
@@ -308,6 +324,7 @@ impl Hover {
             HoverArea::General => self.general,
             HoverArea::Trash => self.trash,
             HoverArea::Settings => self.settings,
+            HoverArea::Move => self.moving,
         }
     }
     fn watch(&mut self, r: egui::Response, danger: bool) -> egui::Response {
@@ -596,6 +613,8 @@ enum GridItem {
     Folder,
     FloatingTrash,
     Lock,
+    /// The profiles, as text above the button.
+    Profile,
     /// Page number, timings, caching, hint.
     Status,
 }
@@ -707,6 +726,23 @@ fn dialog_guid(kind: &str) -> u128 {
     0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000 + index as u128
 }
 
+/// The mark of an image marked to move: a blue tag with a check mark.
+fn paint_move_mark(painter: &egui::Painter, at: Pos2) {
+    let galley = painter.layout_no_wrap(
+        "✔ MOVE".to_owned(),
+        egui::FontId::proportional(13.),
+        Color32::WHITE,
+    );
+    let rect = Rect::from_min_size(at, galley.size() + Vec2::new(16., 8.));
+    painter.rect_filled(rect, 6., MOVE_BLUE.gamma_multiply(0.9));
+    painter.rect_stroke(
+        rect,
+        6.,
+        Stroke::new(1.0_f32, Color32::from_white_alpha(180)),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + Vec2::new(8., 4.), galley, Color32::WHITE);
+}
 /// Clickable text without a button's frame: no box on hover or when chosen,
 /// only the text's colour changes (chosen: green, hovered: bright).
 fn plain_text_link(ui: &mut egui::Ui, text: String, chosen: bool, enabled: bool) -> egui::Response {
@@ -798,6 +834,13 @@ const TOOL_BUTTONS: &[(&str, &str, Icon, Place)] = &[
         Place::Group,
     ),
     ("move", "Move all folder images", Icon::Move, Place::Bar),
+    (
+        "move_one",
+        "Floating Move button (hold: mark images to move)",
+        Icon::FloatingMove,
+        Place::Bar,
+    ),
+    ("profile", "Profiles", Icon::Profile, Place::Group),
     ("folder", "Open folder", Icon::Folder, Place::Bar),
     ("settings", "Settings", Icon::Settings, Place::Bar),
     ("lock", "Lock", Icon::Lock, Place::Bar),
@@ -808,6 +851,7 @@ const BIG_BUTTONS: &[(&str, &str, Icon, Place)] = &[
     ("tags", "Tags", Icon::Tag, Place::Bar),
     ("fullscreen", "Fullscreen", Icon::Fullscreen, Place::Bar),
     ("prompt", "Prompt and seed", Icon::Prompt, Place::Bar),
+    ("profile", "Profiles", Icon::Profile, Place::Group),
     (
         "image_only",
         "Fullscreen shows only the image",
@@ -949,6 +993,13 @@ const GRID_LAYOUT: &[(&str, &str, Icon, Place, GridItem)] = &[
         Icon::GoTo,
         Place::Group,
         GridItem::GoTo,
+    ),
+    (
+        "profile",
+        "Profiles",
+        Icon::Profile,
+        Place::Group,
+        GridItem::Profile,
     ),
 ];
 fn tool_defaults() -> Vec<(&'static str, Place)> {
@@ -1120,6 +1171,37 @@ fn above(ctx: &egui::Context, id: Id, anchor: Pos2, contents: impl FnOnce(&mut e
     let response = egui::Area::new(id)
         .pivot(egui::Align2::CENTER_BOTTOM)
         .fixed_pos(anchor - Vec2::new(0., 6.))
+        .constrain(true)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .corner_radius(12.)
+                .inner_margin(10.)
+                .show(ui, contents);
+        })
+        .response;
+    ctx.move_to_top(response.layer_id);
+    response.rect
+}
+/// A popup above `anchor`, or below `below` when last frame's popup would
+/// not fit above it on the screen.
+fn near(
+    ctx: &egui::Context,
+    id: Id,
+    anchor: Pos2,
+    below: Pos2,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> Rect {
+    let height = ctx.memory(|m| m.area_rect(id)).map_or(0., |r| r.height());
+    let fits_above = anchor.y - 6. - height >= ctx.screen_rect().top();
+    let (pivot, pos) = if fits_above {
+        (egui::Align2::CENTER_BOTTOM, anchor - Vec2::new(0., 6.))
+    } else {
+        (egui::Align2::CENTER_TOP, below + Vec2::new(0., 6.))
+    };
+    let response = egui::Area::new(id)
+        .pivot(pivot)
+        .fixed_pos(pos)
         .constrain(true)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -1524,6 +1606,20 @@ pub struct Viewer {
     slide_suspended: bool,
     last_slide: Instant,
     delete_float: bool,
+    /// A favorite folder being opened: where browsing left it, and whether
+    /// one of its images was opened directly (then that image is shown).
+    restore_place: Option<(FolderPlace, bool)>,
+    /// The image whose place was saved last.
+    place_recorded: Option<PathBuf>,
+    /// The floating Move button (single image view) is shown; marking
+    /// images to move with it, and the images marked so far.
+    move_float: bool,
+    marking: bool,
+    marked: Vec<PathBuf>,
+    /// The marked image shown larger in the Move dialog.
+    move_preview: Option<PathBuf>,
+    /// Where the image was drawn last frame (the mark goes at its corner).
+    image_rect: Option<Rect>,
     dialog: Option<Dialog>,
     keyword_editor: Option<(PathBuf, String)>,
     keyword_loading: Option<PathBuf>,
@@ -1746,6 +1842,13 @@ impl Viewer {
             slide_suspended: false,
             last_slide: Instant::now(),
             delete_float: false,
+            restore_place: None,
+            place_recorded: None,
+            move_float: false,
+            marking: false,
+            marked: Vec::new(),
+            move_preview: None,
+            image_rect: None,
             dialog: None,
             keyword_editor: None,
             keyword_loading: None,
@@ -1995,6 +2098,11 @@ impl Viewer {
             path
         };
         self.loading = true;
+        self.restore_place = self
+            .favorite_place(&folder)
+            .cloned()
+            .map(|place| (place, preferred.is_some()));
+        self.place_recorded = None;
         self.identity_token = self.identity_token.wrapping_add(1);
         self.identity_snapshot = None;
         self.identity_pending = false;
@@ -2010,6 +2118,7 @@ impl Viewer {
         // Images chosen for moving belong to the folder they were chosen in.
         self.move_selection.clear();
         self.move_mode = false;
+        self.stop_marking();
 
         self.index_progress = None;
         self.last_index = None;
@@ -2208,6 +2317,11 @@ impl Viewer {
             self.view_reset = false;
             self.view_fallback = None;
             self.last_slide = Instant::now();
+            if !self.loading {
+                if let Some((place, direct)) = self.restore_place.take() {
+                    self.resume_place(place, direct);
+                }
+            }
             self.changed();
         } else if !done {
             ctx.request_repaint();
@@ -2358,6 +2472,11 @@ impl Viewer {
         self.delete_selection.retain(|p| !removed.contains(p));
         self.tag_selection.retain(|p| !removed.contains(p));
         self.move_selection.retain(|p| !removed.contains(p));
+        self.marked.retain(|p| !removed.contains(p));
+        if self.files.is_empty() {
+            // Every image deleted or moved: nothing left to go back to.
+            self.forget_place();
+        }
         self.view_fallback = Some(old_index);
         // Not rebuild(): the deleted tiles of this page stay visible.
         self.schedule_view(true);
@@ -2987,6 +3106,100 @@ impl Viewer {
     }
     /// Go to image `n` (the image view) or page `n` (the grid page, pages in
     /// order), counted from 1 and kept within the list.
+    /// The saved place in a favorite folder (Settings → Library: favorite
+    /// folders open where browsing left them; kept per profile).
+    fn favorite_place(&self, folder: &Path) -> Option<&FolderPlace> {
+        let s = &self.lib.settings;
+        if !s.remember_favorite_places || !s.favorite_folders.iter().any(|f| f.path == folder) {
+            return None;
+        }
+        s.favorite_places.get(&s.active_profile)?.get(folder)
+    }
+    fn forget_place(&mut self) {
+        let s = &mut self.lib.settings;
+        let Some(folder) = &self.folder else {
+            return;
+        };
+        if let Some(places) = s.favorite_places.get_mut(&s.active_profile) {
+            if places.remove(folder).is_some() {
+                self.dirty = true;
+            }
+        }
+        self.place_recorded = None;
+    }
+    /// A favorite folder opened: browsing goes on from its saved image (or
+    /// the one now at its place in the list, if it is gone); with Shuffle
+    /// the round goes on (images shown before are not shown again, images
+    /// added since still come).
+    fn resume_place(&mut self, place: FolderPlace, direct: bool) {
+        let Some(last) = self.visible.len().checked_sub(1) else {
+            return;
+        };
+        let target = if direct {
+            self.current.clone()
+        } else if self.visible.position(&place.image).is_some() {
+            Some(place.image.clone())
+        } else {
+            self.visible.get(place.index.min(last)).cloned()
+        };
+        let Some(target) = target else {
+            return;
+        };
+        let shuffle = crate::model::Order::Shuffle;
+        let seen = if self.lib.settings.order == shuffle && place.order == shuffle {
+            place.seen
+        } else {
+            vec![]
+        };
+        self.nav.resume(&self.visible, &seen, &target);
+        self.lib.last_image = Some(target.clone());
+        if self.grid {
+            self.grid_jump_to = Some(target.clone());
+        }
+        self.current = Some(target);
+        self.place_recorded = None;
+    }
+    /// Keeps where browsing is in a favorite folder (once per image shown).
+    fn record_place(&mut self) {
+        if !self.lib.settings.remember_favorite_places
+            || self.loading
+            || self.view_pending
+            || self.restore_place.is_some()
+        {
+            return;
+        }
+        let (Some(folder), Some(current)) = (self.folder.clone(), self.current.clone()) else {
+            return;
+        };
+        if self.place_recorded.as_ref() == Some(&current)
+            || !self
+                .lib
+                .settings
+                .favorite_folders
+                .iter()
+                .any(|f| f.path == folder)
+        {
+            return;
+        }
+        let order = self.lib.settings.order;
+        let place = FolderPlace {
+            index: self.visible.position(&current).unwrap_or(0),
+            image: current.clone(),
+            order,
+            seen: if order == crate::model::Order::Shuffle {
+                self.nav.round_seen()
+            } else {
+                vec![]
+            },
+        };
+        let s = &mut self.lib.settings;
+        s.favorite_places
+            .entry(s.active_profile.clone())
+            .or_default()
+            .insert(folder, place);
+        self.place_recorded = Some(current);
+        self.dirty = true;
+    }
     fn go_to(&mut self, n: usize) {
         if self.visible.is_empty() || self.view_pending {
             return;
@@ -3008,6 +3221,11 @@ impl Viewer {
         let Some(p) = self.visible.get(i).cloned() else {
             return;
         };
+        if i == 0 {
+            // Image 1: a favorite folder's saved place starts over.
+            self.forget_place();
+            self.nav.start_over(&self.visible);
+        }
         self.current = Some(p.clone());
         self.lib.last_image = Some(p.clone());
         if self.grid_viewer.is_some() {
@@ -3018,10 +3236,19 @@ impl Viewer {
     }
     /// Favorite folders (Open folder held) and Go to (held), above their
     /// button. A press elsewhere, Escape or the action closes them.
-    fn button_popups(&mut self, ctx: &egui::Context) {
+    /// `late`: the Move dialog's Favourites, drawn after the dialogs so
+    /// that it is above the dialog.
+    fn button_popups(&mut self, ctx: &egui::Context, late: bool) {
         let Some((popup, button)) = self.popup else {
             return;
         };
+        if (popup == Popup::Destination) != late {
+            return;
+        }
+        if popup == Popup::Destination && !matches!(self.dialog, Some(Dialog::Move(_))) {
+            self.popup = None;
+            return;
+        }
         let mut done = false;
         // Just above the bar the button is on, not over its frame: only bars
         // on screen now count (a hidden bar keeps its last place in memory).
@@ -3050,22 +3277,82 @@ impl Viewer {
         let anchor = Pos2::new(button.center().x, top);
         // As wide as the longest entry.
         let font = egui::TextStyle::Button.resolve(&ctx.style());
-        let widest = self
-            .lib
-            .settings
-            .favorite_folders
-            .iter()
-            .map(|f| f.label())
-            .map(|l| format!("🗀 {l}"))
-            .chain([
-                "☆ Remove the open folder".into(),
-                "Manage in Settings…".into(),
-            ])
+        let entries: Vec<String> = if popup == Popup::Profiles {
+            self.profile_names()
+                .into_iter()
+                .chain(["Manage in Settings…".into()])
+                .collect()
+        } else {
+            self.lib
+                .settings
+                .favorite_folders
+                .iter()
+                .map(|f| format!("🗀 {}", f.label()))
+                .chain([
+                    "☆ Remove the open folder".into(),
+                    "Manage in Settings…".into(),
+                ])
+                .collect()
+        };
+        let widest = entries
+            .into_iter()
             .map(|t| ctx.fonts(|f| f.layout_no_wrap(t, font.clone(), Color32::WHITE).size().x))
             .fold(0., f32::max);
+        // Above the button, or below it when there is no room above.
+        let below = Pos2::new(button.center().x, button.bottom());
         let width = (widest + 2. * ctx.style().spacing.button_padding.x + 4.).clamp(160., 420.);
         let rect = match popup {
-            Popup::Favorites => above(ctx, Id::new("favorite_folders"), anchor, |ui| {
+            Popup::Destination => near(ctx, Id::new("favorite_destination"), anchor, below, |ui| {
+                ui.set_width(width);
+                ui.label(RichText::new("Move to a favorite folder").strong());
+                ui.separator();
+                let favorites = self.lib.settings.favorite_folders.clone();
+                if favorites.is_empty() {
+                    ui.label(RichText::new("No favorite folders yet.").color(MUTED));
+                }
+                let style = self.lib.settings.favorite_style.clone();
+                let dest = self.lib.settings.destination.clone();
+                for f in favorites {
+                    let here = f.path == dest;
+                    let r = match style.as_str() {
+                        "text" => plain_text_link(ui, format!("/{}", f.label()), here, !self.busy),
+                        "icon" => plain_text_link(ui, format!("🗀 {}", f.label()), here, !self.busy),
+                        _ => {
+                            ui.add_enabled(!self.busy, egui::Button::new(f.label()).selected(here))
+                        }
+                    }
+                    .on_hover_text(f.path.display().to_string());
+                    if self.hover.watch(r, false).clicked() {
+                        let _ = self.tx.send(Event::Destination(f.path.clone()));
+                        done = true;
+                    }
+                }
+            }),
+            Popup::Profiles => near(ctx, Id::new("profiles_popup"), anchor, below, |ui| {
+                ui.set_width(width);
+                ui.label(RichText::new("Profile").strong());
+                ui.separator();
+                let active = self.lib.settings.active_profile.clone();
+                for name in self.profile_names() {
+                    let key = if name == NO_PROFILE {
+                        String::new()
+                    } else {
+                        name.clone()
+                    };
+                    let r = plain_text_link(ui, name, key == active, true);
+                    if self.hover.watch(r, false).clicked() {
+                        self.pending_profile = Some(key);
+                        done = true;
+                    }
+                }
+                ui.separator();
+                let r = plain_text_link(ui, "Manage in Settings…".into(), false, true);
+                if self.hover.watch(r, false).clicked() {
+                    self.settings = true;
+                    done = true;
+                }
+            }),
+            Popup::Favorites => near(ctx, Id::new("favorite_folders"), anchor, below, |ui| {
                 ui.set_width(width);
                 ui.label(RichText::new("Favorite folders").strong());
                 let open = self.folder.clone();
@@ -3146,7 +3433,7 @@ impl Viewer {
                     self.visible.len()
                 };
                 let mut go = None;
-                let rect = above(ctx, Id::new("go_to"), anchor, |ui| {
+                let rect = near(ctx, Id::new("go_to"), anchor, below, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(if in_grid { "Go to page" } else { "Go to image" });
                         let edit = ui.add(
@@ -3683,6 +3970,14 @@ impl Viewer {
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
                 Color32::WHITE,
             );
+            self.image_rect = Some(rect.intersect(area));
+            // Marked to move: a mark at the image's top-left corner.
+            if self.marking && !self.grid && self.marked.contains(&path) {
+                paint_move_mark(
+                    ui.painter(),
+                    rect.intersect(area).left_top() + Vec2::splat(14.),
+                );
+            }
             let response = ui.interact(
                 rect.intersect(area),
                 ui.id().with("photo"),
@@ -3741,6 +4036,9 @@ impl Viewer {
                     .filter(|_| full_detail)
                 {
                     magnifier::paint(ui.painter(), shown, rect, area, pos, &self.lib.settings);
+                    // The lens (or the whole-window zoom) shows where the
+                    // pointer is; the pointer itself would cover the detail.
+                    ctx.set_cursor_icon(egui::CursorIcon::None);
                 }
             }
             // A first view that was really on screen stays reported for a
@@ -5050,27 +5348,23 @@ impl Viewer {
             self.request_restore();
             ui.close_menu();
         }
-        if !self.lib.settings.profiles.is_empty() {
-            ui.menu_button("Profile", |ui| {
-                let active = self.lib.settings.active_profile.clone();
-                let names: Vec<String> = self
-                    .lib
-                    .settings
-                    .profiles
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-                for name in names {
-                    if self
-                        .hover
-                        .button(ui, name.as_str(), name == active, true, false)
-                    {
-                        self.pending_profile = Some(name);
-                        ui.close_menu();
-                    }
+        ui.menu_button("Profile", |ui| {
+            let active = self.lib.settings.active_profile.clone();
+            for name in self.profile_names() {
+                let key = if name == NO_PROFILE {
+                    String::new()
+                } else {
+                    name.clone()
+                };
+                if self
+                    .hover
+                    .button(ui, name.as_str(), key == active, true, false)
+                {
+                    self.pending_profile = Some(key);
+                    ui.close_menu();
                 }
-            });
-        }
+            }
+        });
         ui.separator();
         if self.hover.button(ui, "Exit NoirView", false, true, true) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -5088,6 +5382,89 @@ impl Viewer {
             self.current = Some(path.clone());
             self.lib.last_image = Some(path);
             self.changed();
+        }
+    }
+    /// The Move dialog's list of marked images: a thumbnail (a click shows it
+    /// larger above the list), the name and Remove. Returns the image taken
+    /// off the list.
+    fn marked_list(&mut self, ui: &mut egui::Ui, sources: &[PathBuf]) -> Option<PathBuf> {
+        const THUMB: Vec2 = Vec2::new(72., 48.);
+        let mut remove = None;
+        if let Some(path) = self.move_preview.clone() {
+            let (rect, response) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 260.), Sense::click());
+            self.paint_thumb(ui, rect, &path);
+            if self
+                .hover
+                .watch(response.on_hover_text("Close the preview"), false)
+                .clicked()
+            {
+                self.move_preview = None;
+            }
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("marked_list")
+            .max_height(240.)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for path in sources {
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    ui.horizontal(|ui| {
+                        let (rect, response) = ui.allocate_exact_size(THUMB, Sense::click());
+                        self.paint_thumb(ui, rect, path);
+                        let shown = self.move_preview.as_ref() == Some(path);
+                        if shown {
+                            ui.painter().rect_stroke(
+                                rect,
+                                4.,
+                                Stroke::new(2.0_f32, MOVE_BLUE),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if self
+                            .hover
+                            .watch(response.on_hover_text("Show larger"), false)
+                            .clicked()
+                        {
+                            self.move_preview = if shown { None } else { Some(path.clone()) };
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.hover.button(ui, "Remove", false, true, false) {
+                                remove = Some(path.clone());
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(egui::Label::new(&name).truncate())
+                                        .on_hover_text(path.display().to_string());
+                                },
+                            );
+                        });
+                    });
+                }
+            });
+        remove
+    }
+    /// An image's thumbnail fitted into `rect` (a spinner while it loads).
+    fn paint_thumb(&mut self, ui: &mut egui::Ui, rect: Rect, path: &Path) {
+        ui.painter()
+            .rect_filled(rect, 4., Color32::from_rgb(21, 26, 33));
+        let key = self.images.key(path.to_path_buf(), true);
+        if let Some((texture, dim)) = self.images.texture(&key) {
+            let size = Vec2::new(dim[0] as f32, dim[1] as f32);
+            let scale = (rect.width() / size.x).min(rect.height() / size.y);
+            ui.painter().image(
+                texture.id(),
+                Rect::from_center_size(rect.center(), size * scale),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                Color32::WHITE,
+            );
+        } else {
+            ui.put(rect, egui::Spinner::new());
         }
     }
     fn recent_window(&mut self, ctx: &egui::Context) {
@@ -5756,6 +6133,23 @@ impl Viewer {
                 }
                 if r.clicked() {
                     self.request_delete(self.delete_selection.iter().cloned().collect());
+                }
+            }
+            Profile => {
+                let open = self.popup.is_some_and(|(p, _)| p == Popup::Profiles);
+                let r = self.grid_button(
+                    ui,
+                    icons,
+                    "profile",
+                    Icon::Profile,
+                    "Profile",
+                    open,
+                    true,
+                    false,
+                );
+                let rect = r.rect;
+                if r.on_hover_text("Profiles").clicked() {
+                    self.toggle_profiles_popup(rect);
                 }
             }
             GoTo => {
@@ -6600,6 +6994,7 @@ impl Viewer {
                 }
             }
             "image_only" => self.image_only_button(ui),
+            "profile" => self.profile_button(ui, ctx, true),
             "lock" => self.lock_button(ui),
             _ => {}
         }
@@ -7070,6 +7465,8 @@ impl Viewer {
                     self.changed();
                 }
             }
+            "move_one" => self.move_one_button(ui, ctx),
+            "profile" => self.profile_button(ui, ctx, true),
             "goto" => {
                 let open = self.popup.is_some_and(|(p, _)| p == Popup::GoTo);
                 let r = self.hover.icon_response(
@@ -7461,6 +7858,221 @@ impl Viewer {
                 }
             }
             ui.ctx().request_repaint();
+        }
+    }
+    /// The toolbar's floating Move button. A click shows or hides the
+    /// floating Move button; holding starts marking images to move (the
+    /// floating button marks them). While marking, a click opens the Move
+    /// dialog for the marked images and holding stops marking.
+    fn move_one_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let tip = if self.marking {
+            format!(
+                "Move the {} marked images (hold: stop marking)",
+                self.marked.len()
+            )
+        } else {
+            "Show the floating Move button (hold: mark images to move)".to_owned()
+        };
+        let r = self.hover.icon_response(
+            ui,
+            Icon::FloatingMove,
+            &tip,
+            self.move_float || self.marking,
+            self.current.is_some(),
+            self.marking.then_some(MOVE_BLUE),
+            false,
+        );
+        if self.marking && !self.marked.is_empty() {
+            count_badge(ui, r.rect, self.marked.len(), MOVE_BLUE);
+        }
+        let (click, long) = self.hold_click(ctx, &r, "move_one");
+        if long {
+            if self.marking {
+                self.stop_marking();
+            } else {
+                self.marking = true;
+                self.move_float = true;
+            }
+        }
+        if click {
+            if self.marking {
+                self.open_marked_move();
+            } else {
+                self.move_float = !self.move_float;
+            }
+        }
+    }
+    fn stop_marking(&mut self) {
+        self.marking = false;
+        self.marked.clear();
+        self.move_preview = None;
+    }
+    /// The Move dialog for the image shown.
+    fn open_one_move(&mut self, path: PathBuf) {
+        let s = &self.lib.settings;
+        let mut plan = MovePlan::new(
+            vec![path],
+            s.move_keep_names,
+            true,
+            &s.destination,
+            s.move_digits,
+        );
+        plan.one = true;
+        self.dialog = Some(Dialog::Move(plan));
+    }
+    /// The Move dialog for the marked images.
+    fn open_marked_move(&mut self) {
+        if self.marked.is_empty() {
+            self.notify("Mark images with the floating Move button first");
+            return;
+        }
+        let s = &self.lib.settings;
+        let mut plan = MovePlan::new(
+            self.marked.clone(),
+            s.move_keep_names,
+            true,
+            &s.destination,
+            s.move_digits,
+        );
+        plan.marked = true;
+        self.move_preview = None;
+        self.dialog = Some(Dialog::Move(plan));
+    }
+    /// Marks the image shown for moving, or takes the mark off.
+    fn toggle_mark(&mut self, path: &Path) {
+        if let Some(i) = self.marked.iter().position(|p| p == path) {
+            self.marked.remove(i);
+        } else {
+            self.marked.push(path.to_path_buf());
+        }
+    }
+    /// The floating Move button over the single image: moves the image shown
+    /// (a Move dialog), or while marking marks it.
+    fn floating_move(&mut self, ctx: &egui::Context) {
+        if !self.move_float || self.grid || self.image_only() {
+            return;
+        }
+        let Some(current) = self.current.clone() else {
+            return;
+        };
+        let s = self.lib.settings.clone();
+        let size = s.delete_size;
+        let start = s
+            .move_pos
+            .map(|v| Pos2::new(v[0], v[1]))
+            .unwrap_or_else(|| {
+                Pos2::new(
+                    ctx.screen_rect().right() - 2. * size - 90.,
+                    ctx.screen_rect().top() + 110.,
+                )
+            });
+        let area = egui::Area::new(Id::new("floating_move"))
+            .default_pos(start)
+            .movable(true)
+            .constrain(true)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let margin = close_margin(s.close_size);
+                let (rect, _) =
+                    ui.allocate_exact_size(Vec2::splat(size + margin * 2.), Sense::hover());
+                let center = rect.center();
+                let radius = size / 2.;
+                let usable = !self.busy && !self.view_pending;
+                let opacity = s.delete_opacity * if usable { 1. } else { 0.4 };
+                let color = |c: [u8; 4]| {
+                    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as f32 * opacity) as u8)
+                };
+                let marked = self.marked.contains(&current);
+                // Marking: a ring in the marking colour, full when marked.
+                ui.painter()
+                    .circle_filled(center, radius, color(s.move_color));
+                let ring = if self.marking {
+                    Stroke::new(
+                        if marked { 4.0_f32 } else { 2. },
+                        MOVE_BLUE.gamma_multiply(opacity),
+                    )
+                } else {
+                    Stroke::new(s.delete_border_width, MOVE_BLUE.gamma_multiply(opacity))
+                };
+                if self.marking || s.delete_border {
+                    ui.painter().circle_stroke(center, radius, ring);
+                }
+                let response = ui.interact(
+                    Rect::from_center_size(center, Vec2::splat(size * 0.7)),
+                    Id::new("move_circle_button"),
+                    Sense::click(),
+                );
+                let response = response.on_hover_text(match (self.marking, marked) {
+                    (false, _) => "Move this image…",
+                    (true, false) => "Mark this image to move",
+                    (true, true) => "Take the mark off",
+                });
+                let response = if usable {
+                    self.hover.watch_in(HoverArea::Move, response, false)
+                } else {
+                    response
+                };
+                let font = (size * 0.16).clamp(10., 28.);
+                let lines = if self.marking {
+                    vec![
+                        (
+                            if marked { "MARKED" } else { "MARK" }.to_owned(),
+                            -font * 0.55,
+                        ),
+                        (self.marked.len().to_string(), font * 0.65),
+                    ]
+                } else {
+                    vec![("MOVE".to_owned(), 0.)]
+                };
+                for (text, dy) in lines {
+                    ui.painter().text(
+                        center + Vec2::new(0., dy),
+                        egui::Align2::CENTER_CENTER,
+                        text,
+                        egui::FontId::proportional(font),
+                        Color32::from_white_alpha((255. * opacity) as u8),
+                    );
+                }
+                if response.clicked() && usable {
+                    if self.marking {
+                        self.toggle_mark(&current);
+                    } else {
+                        self.open_one_move(current.clone());
+                    }
+                }
+                let close = close_center(center, radius, s.close_size, s.close_angle);
+                let rect = Rect::from_center_size(close, Vec2::splat(s.close_size));
+                let r = self.hover.watch_in(
+                    HoverArea::Move,
+                    ui.interact(rect, Id::new("move_close"), Sense::click())
+                        .on_hover_text("Hide the floating Move button"),
+                    false,
+                );
+                ui.painter().circle_filled(
+                    close,
+                    s.close_size / 2.,
+                    Color32::from_rgba_unmultiplied(32, 37, 46, (255. * s.delete_opacity) as u8),
+                );
+                ui.painter().circle_stroke(
+                    close,
+                    s.close_size / 2.,
+                    Stroke::new(1.0_f32, color(s.delete_border_color)),
+                );
+                ui.painter().text(
+                    close,
+                    egui::Align2::CENTER_CENTER,
+                    "×",
+                    egui::FontId::proportional(s.close_size * 0.7),
+                    Color32::from_white_alpha((255. * s.delete_opacity) as u8),
+                );
+                if r.clicked() {
+                    self.move_float = false;
+                }
+            });
+        let p = area.response.rect.min;
+        if self.lib.settings.move_pos != Some([p.x, p.y]) {
+            self.lib.settings.move_pos = Some([p.x, p.y]);
+            self.changed();
         }
     }
     /// What the floating trash button moves to the Recycle Bin: the grid's
@@ -7980,6 +8592,13 @@ impl Viewer {
                     "Activate the floating trash button by hovering",
                 );
                 s.hover_trash = Some(trash);
+                let mut moving = s.hover_move();
+                h.check(
+                    ui,
+                    &mut moving,
+                    "Activate the floating Move button by hovering",
+                );
+                s.hover_move = Some(moving);
                 let mut settings = s.hover_settings();
                 h.check(
                     ui,
@@ -8177,6 +8796,12 @@ impl Viewer {
                 }
                 ui.heading("Favorite folders");
                 ui.label(RichText::new("Hold Open folder (toolbar or grid) to open one of these; the list can also add or remove the open folder.").color(MUTED));
+                h.check(
+                    ui,
+                    &mut s.remember_favorite_places,
+                    "Favorite folders open where browsing left them",
+                );
+                ui.label(RichText::new("Kept for each profile (and for no profile) and across restarts, with the browsing order: Shuffle goes on with the images not yet shown, new ones included. Go to image 1 starts over; deleted images are skipped.").color(MUTED));
                 let mut remove = None;
                 let mut swap = None;
                 let count = s.favorite_folders.len();
@@ -9228,18 +9853,56 @@ impl Viewer {
             }
         }
     }
-    /// Switches to a saved profile: its display and interaction settings,
-    /// the rest as they are.
+    /// The profile choices as shown: None, Default, then the saved ones.
+    fn profile_names(&self) -> Vec<String> {
+        [NO_PROFILE.to_owned(), DEFAULT_PROFILE.to_owned()]
+            .into_iter()
+            .chain(self.lib.settings.profiles.iter().map(|p| p.name.clone()))
+            .collect()
+    }
+    /// The bars' Profile button: the profiles as text above it.
+    fn profile_button(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, tip: bool) {
+        let open = self.popup.is_some_and(|(p, _)| p == Popup::Profiles);
+        let active = self.lib.settings.active_profile.clone();
+        let label = if tip {
+            if active.is_empty() {
+                "Profile: none".to_owned()
+            } else {
+                format!("Profile: {active}")
+            }
+        } else {
+            "Profile".to_owned()
+        };
+        let r = self
+            .hover
+            .icon_response(ui, Icon::Profile, &label, open, true, None, false);
+        if r.clicked() {
+            self.toggle_profiles_popup(r.rect);
+        }
+    }
+    fn toggle_profiles_popup(&mut self, button: Rect) {
+        if self.popup.is_some_and(|(p, _)| p == Popup::Profiles) {
+            self.popup = None;
+        } else {
+            self.open_popup(Popup::Profiles, button);
+        }
+    }
+    /// Switches to a profile: its display and interaction settings, the
+    /// rest as they are. "" is no profile (nothing changes), "Default" the
+    /// default settings.
     fn apply_profile(&mut self, name: &str) {
-        let Some(profile) = self
-            .lib
-            .settings
-            .profiles
-            .iter()
-            .find(|p| p.name == name)
-            .cloned()
-        else {
+        if name.is_empty() {
+            self.lib.settings.active_profile.clear();
+            self.changed();
+            self.notify("No profile");
             return;
+        }
+        let Some(values) = self.lib.settings.profile_target(name) else {
+            return;
+        };
+        let profile = Profile {
+            name: name.to_owned(),
+            values,
         };
         let sort_before = (
             self.lib.settings.sort_key,
@@ -9309,9 +9972,12 @@ impl Viewer {
             .iter()
             .map(|p| p.name.clone())
             .collect();
+        // None and Default cannot be saved over, renamed or deleted.
+        let own = names.contains(&active);
+        let choices = self.profile_names();
         let differences = self.lib.settings.profile_differences();
         let shown = if active.is_empty() {
-            "(none)".to_owned()
+            NO_PROFILE.to_owned()
         } else if differences > 0 {
             format!("{active} — {differences} changed")
         } else {
@@ -9326,22 +9992,21 @@ impl Viewer {
                 .selected_text(shown)
                 .width(220.)
                 .show_ui(ui, |ui| {
-                    if names.is_empty() {
-                        ui.label(RichText::new("No profiles yet: Save as new…").color(MUTED));
-                    }
-                    for name in &names {
-                        if ui.selectable_label(*name == active, name).clicked() {
-                            self.pending_profile = Some(name.clone());
+                    for name in &choices {
+                        let key = if name == NO_PROFILE {
+                            String::new()
+                        } else {
+                            name.clone()
+                        };
+                        if ui.selectable_label(key == active, name).clicked() {
+                            self.pending_profile = Some(key);
                         }
                     }
                 });
-            if self.hover.button(
-                ui,
-                "Save",
-                false,
-                !active.is_empty() && differences > 0,
-                false,
-            ) {
+            if self
+                .hover
+                .button(ui, "Save", false, own && differences > 0, false)
+            {
                 self.save_profile(&active);
             }
             if self.hover.button(ui, "Save as new…", false, true, false) {
@@ -9351,16 +10016,10 @@ impl Viewer {
                 }
                 self.profile_edit = Some((None, format!("Profile {n}")));
             }
-            if self
-                .hover
-                .button(ui, "Rename…", false, !active.is_empty(), false)
-            {
+            if self.hover.button(ui, "Rename…", false, own, false) {
                 self.profile_edit = Some((Some(active.clone()), active.clone()));
             }
-            if self
-                .hover
-                .button(ui, "Delete…", false, !active.is_empty(), true)
-            {
+            if self.hover.button(ui, "Delete…", false, own, true) {
                 self.dialog = Some(Dialog::DeleteProfile(active.clone()));
             }
         });
@@ -9368,9 +10027,13 @@ impl Viewer {
             return;
         };
         let name = text.trim().to_owned();
-        let taken = names
+        let reserved = [NO_PROFILE, DEFAULT_PROFILE]
             .iter()
-            .any(|n| *n == name && Some(n) != renamed.as_ref());
+            .any(|r| r.eq_ignore_ascii_case(&name));
+        let taken = reserved
+            || names
+                .iter()
+                .any(|n| *n == name && Some(n) != renamed.as_ref());
         let mut done = None;
         ui.allocate_ui_with_layout(row, centred, |ui| {
             ui.label(if renamed.is_some() {
@@ -9415,6 +10078,7 @@ impl Viewer {
             // Profiles saved, renamed or deleted meanwhile stay.
             let mut before = *before;
             before.profiles = std::mem::take(&mut self.lib.settings.profiles);
+            before.favorite_places = std::mem::take(&mut self.lib.settings.favorite_places);
             if !before
                 .profiles
                 .iter()
@@ -9476,7 +10140,11 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
             Dialog::Move(mut plan)=>{
                 // One width whatever the names: long ones are cut, not widening it.
                 ui.set_width(440.);
-                ui.heading(if plan.selected {
+                ui.heading(if plan.one {
+                    "Move this image?".to_owned()
+                } else if plan.marked {
+                    format!("Move {} marked images?", plan.sources.len())
+                } else if plan.selected {
                     format!("Move {} selected images?", plan.sources.len())
                 } else {
                     "Move all folder images?".to_owned()
@@ -9492,13 +10160,25 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                         }
                     );
                     // Long paths end in "…" instead of widening the dialog.
-                    let width = (ui.available_width() - 96.).max(120.);
+                    let width = (ui.available_width() - 190.).max(120.);
                     ui.allocate_ui(Vec2::new(width, 20.), |ui| {
                         ui.add(egui::Label::new(text).truncate())
                             .on_hover_text(dest.display().to_string());
                     });
                     if self.hover.button(ui, "Browse…", false, !self.busy, false) {
                         self.pick("destination");
+                    }
+                    // A favorite folder as the destination, listed above (or
+                    // below) the button.
+                    let open = self.popup.is_some_and(|(p, _)| p == Popup::Destination);
+                    let r = ui.add_enabled(!self.busy, egui::Button::new("Favourites…").selected(open));
+                    let rect = r.rect;
+                    if self.hover.watch(r, false).clicked() {
+                        if open {
+                            self.popup = None;
+                        } else {
+                            self.open_popup(Popup::Destination, rect);
+                        }
                     }
                 });
                 let mut keep = plan.keep_names;
@@ -9507,6 +10187,17 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                     plan.keep_names = keep;
                     plan.replan(&self.lib.settings.destination);
                     self.dialog = Some(Dialog::Move(plan.clone()));
+                }
+                if plan.marked {
+                    if let Some(remove) = self.marked_list(ui, &plan.sources) {
+                        plan.sources.retain(|p| *p != remove);
+                        self.marked.retain(|p| *p != remove);
+                        if self.move_preview.as_ref() == Some(&remove) {
+                            self.move_preview = None;
+                        }
+                        plan.replan(&self.lib.settings.destination);
+                        self.dialog = Some(Dialog::Move(plan.clone()));
+                    }
                 }
                 match &plan.items {
                     Ok(items) => {
@@ -9529,9 +10220,12 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                 });
                 ui.horizontal(|ui| {
                     let ready = plan.items.as_ref().is_ok_and(|i| !i.is_empty());
-                    if self.hover.button(ui, "Move images", false, ready && !self.busy && !self.view_pending, true) {
+                    let label = if plan.one { "Move image" } else { "Move images" };
+                    if self.hover.button(ui, label, false, ready && !self.busy && !self.view_pending, true) {
                         if let Ok(items) = plan.items.clone() {
-                            if plan.selected {
+                            if plan.marked {
+                                self.stop_marking();
+                            } else if plan.selected && !plan.one {
                                 self.move_mode = false;
                                 self.move_selection.clear();
                             }
@@ -9544,6 +10238,8 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                         }
                     }
                     if self.hover.button(ui, "Cancel", false, true, false) {
+                        // Marked images stay marked.
+                        self.move_preview = None;
                         close = true;
                     }
                 });
@@ -10318,6 +11014,13 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             let recent: Vec<PathBuf> = self.recent.iter().cloned().collect();
             high.extend(recent.into_iter().map(|p| self.images.key(p, true)));
         }
+        // The Move dialog's marked images (thumbnails).
+        if let Some(Dialog::Move(plan)) = &self.dialog {
+            if plan.marked {
+                let marked = plan.sources.clone();
+                high.extend(marked.into_iter().map(|p| self.images.key(p, true)));
+            }
+        }
         self.health();
         if self.memory_high || self.grid_viewer.is_some() {
             // Safety guard: keep showing what is on screen, skip speculative work.
@@ -10681,12 +11384,14 @@ impl eframe::App for Viewer {
         self.gesture_frame(ctx);
         self.toolbar(ctx);
         self.order_chooser(ctx);
-        self.button_popups(ctx);
+        self.button_popups(ctx, false);
         self.prompt_window(ctx);
         self.grid_icon_bar(ctx);
         self.panels(ctx);
         self.tag_favorite_chooser(ctx);
         self.floating_delete(ctx);
+        self.floating_move(ctx);
+        self.record_place();
         self.info_window(ctx);
         self.recent_window(ctx);
         self.help_window(ctx);
@@ -10697,6 +11402,7 @@ impl eframe::App for Viewer {
         }
         self.hover.area = HoverArea::General;
         self.dialogs(ctx);
+        self.button_popups(ctx, true);
         self.window_diagnostics(ctx);
         // Toolbar/page/settings actions can change demand during UI construction.
         // Publish the whole batch atomically, with foreground before prefetch.
@@ -11398,8 +12104,8 @@ mod tests {
         let (items, bar) = v.grid_items(true);
         assert_eq!(
             &items[bar..],
-            [GridItem::GoTo],
-            "Go to in the group by default"
+            [GridItem::GoTo, GridItem::Profile],
+            "Go to and Profiles in the group by default"
         );
         assert_eq!(items[bar - 1], GridItem::Status);
         let d = grid_defaults();
@@ -11412,7 +12118,7 @@ mod tests {
         assert_eq!(items[bar - 1], GridItem::Status, "the status ends the bar");
         assert_eq!(
             &items[bar..],
-            [GridItem::Sort, GridItem::GoTo],
+            [GridItem::Sort, GridItem::GoTo, GridItem::Profile],
             "the group after it"
         );
         let tags = items.iter().position(|i| *i == GridItem::Tags).unwrap();
@@ -11449,9 +12155,10 @@ mod tests {
         v.rebuild();
         finish_view(&mut v, &ctx);
         v.bar = true;
-        // Image only, the round notice and Go to are in the group by default.
+        // Image only, the round notice, Go to and Profiles are in the group
+        // by default.
         let (_, grouped) = split_places(&v.bar_items("toolbar", &tool_defaults()));
-        assert_eq!(grouped, ["image_only", "round", "goto"]);
+        assert_eq!(grouped, ["image_only", "round", "goto", "profile"]);
         v.group_open = Some("toolbar");
         let frame = |v: &mut Viewer, events: Vec<egui::Event>| {
             let raw = egui::RawInput {
@@ -11481,7 +12188,7 @@ mod tests {
         // Nothing grouped: no » and no group bar.
         let d = tool_defaults();
         let mut slots = None;
-        for key in ["image_only", "round", "goto"] {
+        for key in ["image_only", "round", "goto", "profile"] {
             slots = Some(crate::bar_layout::placed(
                 &d,
                 slots.as_deref(),
@@ -12138,6 +12845,152 @@ mod tests {
         };
         assert_eq!(row(0.), row(6.));
         assert_eq!(row(0.), row(-6.));
+    }
+    #[test]
+    fn the_floating_move_button_moves_one_image_or_marks_several() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 5);
+        let files = v.files.clone();
+        // Not marking: a Move dialog for the image shown.
+        v.open_one_move(files[0].clone());
+        match &v.dialog {
+            Some(Dialog::Move(plan)) => {
+                assert!(plan.one && !plan.marked);
+                assert_eq!(plan.sources, vec![files[0].clone()]);
+            }
+            _ => panic!("no Move dialog"),
+        }
+        v.dialog = None;
+        // Marking: nothing marked yet says so; marks toggle; the dialog
+        // lists them in the order marked.
+        v.marking = true;
+        v.open_marked_move();
+        assert!(v.dialog.is_none());
+        v.toggle_mark(&files[3]);
+        v.toggle_mark(&files[1]);
+        v.toggle_mark(&files[2]);
+        v.toggle_mark(&files[2]);
+        v.open_marked_move();
+        match &v.dialog {
+            Some(Dialog::Move(plan)) => {
+                assert!(plan.marked && !plan.one);
+                assert_eq!(plan.sources, vec![files[3].clone(), files[1].clone()]);
+            }
+            _ => panic!("no Move dialog"),
+        }
+        // A marked image deleted meanwhile leaves the marks.
+        v.dialog = None;
+        v.folder_paths = v.files.iter().cloned().collect();
+        v.remove_from_view(std::slice::from_ref(&files[3]));
+        assert_eq!(v.marked, vec![files[1].clone()]);
+        // The mark is drawn at the image's corner while marking.
+        v.current = Some(files[1].clone());
+        v.stop_marking();
+        assert!(!v.marking && v.marked.is_empty());
+    }
+    #[test]
+    fn a_favorite_folder_opens_where_browsing_left_it_per_profile() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 12);
+        let folder = PathBuf::from("/p");
+        v.folder = Some(folder.clone());
+        v.loading = false;
+        v.lib
+            .settings
+            .favorite_folders
+            .push(crate::model::FavoriteFolder {
+                name: String::new(),
+                path: folder.clone(),
+            });
+        v.lib.settings.remember_favorite_places = true;
+        v.lib.settings.order = crate::model::Order::Shuffle;
+        let mut shown = vec![v.current.clone().unwrap()];
+        v.nav.jump(&v.visible, &shown[0]);
+        for _ in 0..5 {
+            v.navigate(true);
+            shown.push(v.current.clone().unwrap());
+            v.record_place();
+        }
+        let place = v.lib.settings.favorite_places[""][&folder].clone();
+        assert_eq!(place.image, shown[5]);
+        assert_eq!(place.seen.len(), 6);
+        // Another profile keeps its own place.
+        v.lib.settings.active_profile = "Evening".into();
+        v.place_recorded = None;
+        v.record_place();
+        assert_eq!(v.lib.settings.favorite_places.len(), 2);
+        v.lib.settings.active_profile.clear();
+        // Opened again (one image deleted, one added meanwhile): the same
+        // image, and the round shows only the images not shown yet.
+        let mut w = browsing_viewer(&ctx, 12);
+        w.files.retain(|p| *p != shown[2]);
+        w.files.push("/p/new.jpg".into());
+        w.rebuild();
+        finish_view(&mut w, &ctx);
+        w.lib.settings = v.lib.settings.clone();
+        w.folder = Some(folder.clone());
+        w.loading = false;
+        let place = w.favorite_place(&folder).cloned().unwrap();
+        w.resume_place(place, false);
+        assert_eq!(w.current.as_ref(), Some(&shown[5]));
+        let mut rest = HashSet::new();
+        for _ in 0..7 {
+            w.navigate(true);
+            rest.insert(w.current.clone().unwrap());
+        }
+        assert_eq!(rest.len(), 7, "the 6 not shown and the new one");
+        assert!(rest.contains(Path::new("/p/new.jpg")));
+        assert!(shown.iter().all(|p| !rest.contains(p)));
+        // Go to image 1 starts over.
+        w.go_to(1);
+        assert!(w.favorite_place(&folder).is_none());
+        // Off: nothing is kept or used.
+        w.lib.settings.remember_favorite_places = false;
+        w.place_recorded = None;
+        w.record_place();
+        assert!(w.favorite_place(&folder).is_none());
+    }
+    #[test]
+    fn no_profile_and_the_default_profile_can_be_chosen() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        assert_eq!(v.profile_names()[..2], ["None", "Default"]);
+        v.lib.settings.lens_zoom = 7.;
+        v.lib.settings.destination = "/kept".into();
+        v.apply_profile(DEFAULT_PROFILE);
+        assert_eq!(v.lib.settings.active_profile, "Default");
+        assert_eq!(v.lib.settings.lens_zoom, Settings::default().lens_zoom);
+        assert_eq!(v.lib.settings.destination, PathBuf::from("/kept"));
+        assert_eq!(v.lib.settings.profile_differences(), 0);
+        v.lib.settings.lens_zoom = 7.;
+        assert_eq!(v.lib.settings.profile_differences(), 1);
+        v.apply_profile("");
+        assert!(v.lib.settings.active_profile.is_empty());
+        assert_eq!(v.lib.settings.lens_zoom, 7., "no profile changes nothing");
+    }
+    #[test]
+    fn a_popup_without_room_above_its_button_opens_below() {
+        let ctx = egui::Context::default();
+        let show = |anchor: Pos2| {
+            let mut rect = Rect::NOTHING;
+            for _ in 0..3 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    rect = near(
+                        ctx,
+                        Id::new(("p", anchor.y as i32)),
+                        anchor,
+                        anchor + Vec2::new(0., 20.),
+                        |ui| {
+                            ui.add_space(120.);
+                            ui.label("entries");
+                        },
+                    );
+                });
+            }
+            rect
+        };
+        assert!(show(Pos2::new(400., 500.)).bottom() <= 500.);
+        assert!(show(Pos2::new(400., 40.)).top() >= 60.);
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {
@@ -12910,6 +13763,8 @@ mod tests {
         v.lib.settings.grid_round_full = false;
         // Nothing in the group: only what does not fit goes behind ».
         let slots = crate::bar_layout::placed(&grid_defaults(), None, "goto", Place::Bar);
+        let slots =
+            crate::bar_layout::placed(&grid_defaults(), Some(&slots), "profile", Place::Bar);
         v.lib.settings.bar_buttons.insert("grid".into(), slots);
         v.lib.settings.grid_bar_icons = true;
         v.lib.settings.thumbnail_count = 9;

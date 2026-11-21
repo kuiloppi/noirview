@@ -194,6 +194,9 @@ pub struct Settings {
     pub hover_trash: Option<bool>,
     /// Hover activation for the Settings window's controls (as above).
     pub hover_settings: Option<bool>,
+    /// The floating Move button activates by hovering (as `hover` until
+    /// changed).
+    pub hover_move: Option<bool>,
     pub hover_ms: u64,
     pub destructive_ms: u64,
     /// Play animated GIFs in the single image view and the big image from
@@ -412,6 +415,14 @@ pub struct Settings {
     /// (empty: none).
     pub profiles: Vec<Profile>,
     pub active_profile: String,
+    /// The floating Move button (single image view): its place and colour.
+    pub move_pos: Option<[f32; 2]>,
+    pub move_color: [u8; 4],
+    /// Favorite folders open where browsing left them (kept per profile).
+    pub remember_favorite_places: bool,
+    /// Where browsing was in each favorite folder, per profile (key: the
+    /// profile's name, "" without one).
+    pub favorite_places: BTreeMap<String, BTreeMap<PathBuf, FolderPlace>>,
     /// The title after NOIRVIEW shares its baseline, raised by this many
     /// points (negative: lowered).
     pub title_raise: f32,
@@ -509,6 +520,7 @@ impl Default for Settings {
             // `None`: settings saved before 0.1.45 take these from `hover`.
             hover_trash: None,
             hover_settings: None,
+            hover_move: None,
             hover_ms: 750,
             destructive_ms: 1500,
             animate_gif: true,
@@ -598,6 +610,10 @@ impl Default for Settings {
             dialog_places: BTreeMap::new(),
             profiles: Vec::new(),
             active_profile: String::new(),
+            move_pos: None,
+            move_color: [38, 84, 150, 235],
+            remember_favorite_places: false,
+            favorite_places: BTreeMap::new(),
             grid_page_wrap: false,
             preview_close_move_px: 0.,
             grid_viewer_browse: false,
@@ -749,14 +765,26 @@ impl Settings {
             self.initialize_after_load();
         }
     }
+    /// A profile's settings: a saved one, or the defaults for "Default".
+    pub fn profile_target(&self, name: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+        if name == DEFAULT_PROFILE {
+            // As loaded: options that follow another until changed are set.
+            let mut defaults = Settings::default();
+            defaults.initialize_after_load();
+            return Some(defaults.profile_values());
+        }
+        self.profiles
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.values.clone())
+    }
     /// The settings that differ from the profile in use (none in use: 0).
     pub fn profile_differences(&self) -> usize {
-        let Some(profile) = self.profiles.iter().find(|p| p.name == self.active_profile) else {
+        let Some(values) = self.profile_target(&self.active_profile) else {
             return 0;
         };
         let now = self.profile_values();
-        profile
-            .values
+        values
             .iter()
             .filter(|(k, v)| now.get(*k).is_some_and(|n| !same_value(n, v)))
             .count()
@@ -779,6 +807,7 @@ impl Settings {
         // for the trash button and the Settings window until changed.
         self.hover_trash.get_or_insert(self.hover);
         self.hover_settings.get_or_insert(self.hover);
+        self.hover_move.get_or_insert(self.hover);
         self.bar_bottom_grid.get_or_insert(self.bar_bottom);
     }
     pub fn bar_bottom_grid(&self) -> f32 {
@@ -786,6 +815,9 @@ impl Settings {
     }
     pub fn hover_trash(&self) -> bool {
         self.hover_trash.unwrap_or(self.hover)
+    }
+    pub fn hover_move(&self) -> bool {
+        self.hover_move.unwrap_or(self.hover)
     }
     pub fn hover_settings(&self) -> bool {
         self.hover_settings.unwrap_or(self.hover)
@@ -827,6 +859,9 @@ pub struct Profile {
     pub values: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The built-in profile with the default display and interaction settings.
+pub const DEFAULT_PROFILE: &str = "Default";
+
 /// Settings a profile leaves alone: folders and files, folder watching and
 /// the service, caches, backups, the graphics backend, diagnostics, the
 /// profiles themselves and remembered places.
@@ -835,6 +870,8 @@ pub const PROFILE_EXCLUDED: &[&str] = &[
     "active_profile",
     "dialog_places",
     "delete_pos",
+    "move_pos",
+    "favorite_places",
     "favorite_folders",
     "recursive",
     "watch_folders",
@@ -898,6 +935,18 @@ fn same_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
         }
         _ => a == b,
     }
+}
+
+/// Where browsing was in a folder: the image shown, the browsing order then,
+/// and with Shuffle the images already shown in the round.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderPlace {
+    pub image: PathBuf,
+    /// Its place in the list, for when it is gone.
+    pub index: usize,
+    pub order: Order,
+    pub seen: Vec<PathBuf>,
 }
 
 /// A favorite folder: its name in the list (empty: the folder's name).
@@ -1073,7 +1122,6 @@ impl Navigator {
         }
         self.rebuild_pool(files);
     }
-    #[cfg(test)]
     fn rebuild_pool(&mut self, files: &VisibleFiles) {
         self.remaining = (0..files.len()).collect();
         self.slots = (0..files.len()).collect();
@@ -1135,6 +1183,40 @@ impl Navigator {
             self.mark_seen(files, i);
         }
         self.trim_history();
+    }
+    /// The images shown in the current Shuffle round.
+    pub fn round_seen(&self) -> Vec<PathBuf> {
+        self.seen
+            .iter()
+            .filter(|(_, cycle)| **cycle == self.cycle)
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+    /// Browsing goes on from a saved place: `seen` were already shown in
+    /// this Shuffle round (images gone since are left out; images added
+    /// since are still to come), and `current` is shown now.
+    pub fn resume(&mut self, files: &VisibleFiles, seen: &[PathBuf], current: &Path) {
+        self.history.clear();
+        self.cursor = 0;
+        self.future.clear();
+        self.past.clear();
+        self.backward = false;
+        self.seen.clear();
+        for p in seen.iter().filter(|p| files.position(p).is_some()) {
+            self.seen.insert(p.clone(), self.cycle);
+        }
+        self.rebuild_pool(files);
+        self.jump(files, current);
+    }
+    /// A new start: nothing shown yet in this round, no history.
+    pub fn start_over(&mut self, files: &VisibleFiles) {
+        self.history.clear();
+        self.cursor = 0;
+        self.future.clear();
+        self.past.clear();
+        self.backward = false;
+        self.seen.clear();
+        self.rebuild_pool(files);
     }
     pub fn history_len(&self) -> usize {
         self.history.len()

@@ -11,11 +11,11 @@ A quiet, dark image viewer for Windows 10/11 (64-bit), written in Rust with egui
 - **Browsing:** in order, random or shuffle (with or without history), slideshow, mouse wheel and edge strips, go to an image or page by number, a notice when every image has been shown, recently viewed images, favorite folders.
 - **Thumbnail grid:** page sizes and size buttons, page order, wrap-around pages, hover preview, a big image view that can be browsed, selection for deleting, tagging and moving.
 - **Tags:** IPTC, XMP and Windows XP keywords read and written losslessly (sidecars supported), Favorite / Elite marks, a tag palette, filters (all / any / exclude), a keyword index in SQLite.
-- **Files:** move to the Recycle Bin with confirmation and *Restore deleted* (Ctrl+Z); verified moves to a destination folder with sequence or original names and a recovery journal; copy file / image; prompt and seed from ComfyUI and Automatic1111 images.
+- **Files:** move to the Recycle Bin with confirmation and *Restore deleted* (Ctrl+Z); verified moves to a destination folder with sequence or original names and a recovery journal (the folder, chosen images, the image shown, or images marked while browsing); copy file / image; prompt and seed from ComfyUI and Automatic1111 images.
 - **Bars:** a floating toolbar, the grid's icon bar or text buttons and the big image's bar; every button can be reordered, hidden or put in a group behind ».
 - **Folder watching:** changes in the open and watched folders are picked up; on NTFS an optional service reads the USN journal (`noirview-usn.exe`).
 - **Rendering:** OpenGL by default on Windows; Vulkan or DirectX 12 (wgpu) can be chosen. Optional AI upscaling through ONNX Runtime with DirectML (bring your own model).
-- **Profiles:** named sets of display and interaction settings, switched from Settings or the right-click menu.
+- **Profiles:** named sets of display and interaction settings (plus None and Default), switched from Settings, the bars' Profile button or the right-click menu; favorite folders can open where browsing left them, per profile.
 - **Portable:** settings and caches live in a `data` folder next to the program.
 
 ## Build
