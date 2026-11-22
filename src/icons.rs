@@ -45,6 +45,8 @@ pub enum Icon {
     Profile,
     /// The floating Move button (single image): a circle with an arrow.
     FloatingMove,
+    /// Keep the original file names: a name label with text lines.
+    KeepNames,
 }
 pub fn paint(p: &egui::Painter, center: Pos2, icon: Icon, color: Color32) {
     let s = Stroke::new(1.7_f32, color);
@@ -89,6 +91,14 @@ pub fn paint(p: &egui::Painter, center: Pos2, icon: Icon, color: Color32) {
                 })
                 .collect();
             p.add(egui::Shape::line(points, s));
+        }
+        Icon::KeepNames => {
+            path(
+                &[(-9., -6.), (5., -6.), (9., 0.), (5., 6.), (-9., 6.)],
+                true,
+            );
+            line((-6., -2.), (3., -2.));
+            line((-6., 2.), (1., 2.));
         }
         Icon::FloatingMove => {
             p.circle_stroke(center, 10., s);

@@ -420,14 +420,18 @@ pub struct Settings {
     /// The floating Move button (single image view): its place and colour.
     pub move_pos: Option<[f32; 2]>,
     pub move_color: [u8; 4],
-    /// The Move dialog's marked images: thumbnail height; a click on one
-    /// shows it larger in the dialog, or resting on one opens it like the
-    /// grid's hover preview.
+    /// The marked images' Move grid (a grid of only them): its own page
+    /// size and rounding, or all of them on one scrolling page with
+    /// thumbnails this high; the big image browses the marked images.
     pub marked_thumb_px: f32,
-    pub marked_preview_float: bool,
-    /// The Move dialog shows the marked images as a grid above its
-    /// controls, larger with more images.
-    pub move_dialog_grid: bool,
+    pub move_grid_count: usize,
+    pub move_grid_round_full: bool,
+    pub move_grid_all: bool,
+    pub move_grid_browse: bool,
+    /// The × at each thumbnail's corner there: fill colour, size, opacity.
+    pub move_x_color: [u8; 4],
+    pub move_x_size: f32,
+    pub move_x_opacity: f32,
     /// Images marked to move show their mark on the grid's tiles too.
     pub grid_move_marks: bool,
     /// Favorite folders open where browsing left them (kept per profile).
@@ -625,9 +629,14 @@ impl Default for Settings {
             active_profile: String::new(),
             move_pos: None,
             move_color: [38, 84, 150, 235],
-            marked_thumb_px: 48.,
-            marked_preview_float: false,
-            move_dialog_grid: false,
+            marked_thumb_px: 120.,
+            move_grid_count: 12,
+            move_grid_round_full: true,
+            move_grid_all: false,
+            move_grid_browse: true,
+            move_x_color: [20, 24, 30, 255],
+            move_x_size: 22.,
+            move_x_opacity: 0.9,
             grid_move_marks: true,
             remember_favorite_places: false,
             favorite_places: BTreeMap::new(),
