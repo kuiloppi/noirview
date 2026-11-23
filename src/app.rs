@@ -1721,6 +1721,10 @@ pub struct Viewer {
     /// scroll offset with all images on one page.
     move_grid: Option<MoveGridSaved>,
     move_grid_scroll: f32,
+    /// The grid's columns and row height last drawn (the Move grid's one
+    /// page steps by them).
+    grid_columns: usize,
+    grid_row_height: f32,
     /// Where the image was drawn last frame (the mark goes at its corner).
     image_rect: Option<Rect>,
     dialog: Option<Dialog>,
@@ -1953,6 +1957,8 @@ impl Viewer {
             marked: Vec::new(),
             move_grid: None,
             move_grid_scroll: 0.,
+            grid_columns: 1,
+            grid_row_height: 0.,
             image_rect: None,
             dialog: None,
             keyword_editor: None,
@@ -1982,6 +1988,8 @@ impl Viewer {
             Ok(lib) => {
                 self.lib = lib;
                 self.lib.settings.initialize_after_load();
+                // Closed with the Move grid open: the grid's settings back.
+                self.lib.settings.leave_move_grid_settings();
                 self.tag_picker = crate::tags::TagPicker::default();
                 self.filter_picker = crate::tags::TagPicker::all();
                 self.persist_allowed = true;
@@ -2225,6 +2233,7 @@ impl Viewer {
         self.move_mode = false;
         if self.move_grid.take().is_some() {
             self.grid = false;
+            self.lib.settings.leave_move_grid_settings();
         }
         self.stop_marking();
 
@@ -3335,7 +3344,7 @@ impl Viewer {
         }
         let n = n.max(1);
         if self.grid && self.grid_viewer.is_none() {
-            if self.lib.settings.grid_page_order != crate::model::Order::Sequential {
+            if !self.sequential_pages() {
                 self.notify("Go to a page works with the In order page order");
                 return;
             }
@@ -4333,7 +4342,7 @@ impl Viewer {
         // Opened from the image view: start at that image's page.
         if !self.view_pending {
             if let Some(path) = self.grid_jump_to.take() {
-                let ordered = self.lib.settings.grid_page_order == crate::model::Order::Sequential;
+                let ordered = self.sequential_pages();
                 if let Some(i) = self.visible.position(&path).filter(|_| ordered) {
                     self.grid_start = i / count * count;
                 }
@@ -4367,10 +4376,16 @@ impl Viewer {
         // The controls may have changed the page or its size: pick the tiles
         // afterwards so this frame draws (and times) the page now selected.
         let count = self.grid_count();
-        self.grid_start = self
-            .grid_start
-            .min(self.visible.len().saturating_sub(1) / count * count);
-        let ghosts = self.grid_ghosts.as_ref().filter(|g| g.count == count);
+        let all = self.move_grid_all();
+        if !all {
+            self.grid_start = self
+                .grid_start
+                .min(self.visible.len().saturating_sub(1) / count * count);
+        }
+        let ghosts = self
+            .grid_ghosts
+            .as_ref()
+            .filter(|g| g.count == count && !all);
         let deleted: HashSet<PathBuf> = ghosts.map(|g| g.deleted.clone()).unwrap_or_default();
         let ghost_textures = ghosts.map(|g| g.textures.clone()).unwrap_or_default();
         let paths: Vec<_> = match ghosts {
@@ -4389,44 +4404,49 @@ impl Viewer {
         self.grid_area = Some(area);
         // Laid out for the page size, not the paths on a short last page, so
         // cells keep the same size on every page.
-        // The Move grid with all images on one page: tiles of a set size in
-        // rows that scroll (wheel over the tiles).
-        let all = self.move_grid_all();
-        let l = if all {
-            let h = self.lib.settings.marked_thumb_px.clamp(40., 480.);
-            let w = h * crate::grid_layout::ASPECT;
-            let columns =
-                (((rect.width() + GAP) / (w + GAP)).floor() as usize).clamp(1, paths.len().max(1));
-            crate::grid_layout::Layout {
-                columns,
-                rows: paths.len().div_ceil(columns).max(1),
-                image_w: w,
-                image_h: h,
-            }
-        } else {
-            layout(count, area)
-        };
+        let l = layout(count, area);
         let cell = Vec2::new(l.image_w, l.image_h + CAPTION);
         let used = Vec2::new(
             l.columns as f32 * cell.x + (l.columns - 1) as f32 * GAP,
             l.rows as f32 * cell.y + (l.rows - 1) as f32 * GAP,
         );
         let clip = ui.clip_rect();
-        let origin = if all {
-            let room = (used.y - rect.height()).max(0.);
-            if ui.rect_contains_pointer(rect) && self.preview.is_none() {
-                self.move_grid_scroll -= ui.input(|i| i.smooth_scroll_delta.y);
-            }
-            self.move_grid_scroll = self.move_grid_scroll.clamp(0., room);
-            ui.set_clip_rect(rect.expand2(Vec2::new(16., 4.)).intersect(clip));
-            let top = if room > 0. {
-                rect.top() - self.move_grid_scroll
+        // The Move grid's one page going on: the page's rows from the first
+        // shown, sliding into place after a step (rows above or below drawn
+        // while they slide out).
+        let mut first_row = 0isize;
+        let (paths, origin) = if all {
+            let columns = l.columns.max(1);
+            let row_height = cell.y + GAP;
+            self.grid_columns = columns;
+            self.grid_row_height = row_height;
+            let len = self.visible.len();
+            let last = len.div_ceil(columns).saturating_sub(l.rows) * columns;
+            self.grid_start = (self.grid_start / columns * columns).min(last);
+            let dt = ui.input(|i| i.stable_dt).min(0.1);
+            self.move_grid_scroll *= (1. - dt * 14.).clamp(0., 1.);
+            if self.move_grid_scroll.abs() < 0.5 {
+                self.move_grid_scroll = 0.;
             } else {
-                rect.center().y - used.y / 2.
-            };
-            Pos2::new(rect.center().x - used.x / 2., top)
+                ui.ctx().request_repaint();
+            }
+            let offset = self.move_grid_scroll;
+            let before = (offset.max(0.) / row_height).ceil() as usize;
+            let after = ((-offset).max(0.) / row_height).ceil() as usize;
+            let first = self.grid_start.saturating_sub(before * columns);
+            let end = (self.grid_start + (l.rows + after) * columns).min(len);
+            first_row = -(((self.grid_start - first) / columns) as isize);
+            ui.set_clip_rect(rect.expand2(Vec2::new(16., 4.)).intersect(clip));
+            let paths: Vec<PathBuf> = self
+                .visible
+                .iter()
+                .skip(first)
+                .take(end - first)
+                .cloned()
+                .collect();
+            (paths, rect.center() - used / 2. + Vec2::new(0., offset))
         } else {
-            rect.center() - used / 2.
+            (paths, rect.center() - used / 2.)
         };
         let mut take_off = None;
         let mut loaded = true;
@@ -4436,7 +4456,7 @@ impl Viewer {
         let mut all_rings: Vec<(Pos2, f32)> = vec![];
         let hover_preview = self.lib.settings.grid_hover_preview && self.preview.is_none();
         for (i, path) in paths.iter().enumerate() {
-            let (col, row) = (i % l.columns, i / l.columns);
+            let (col, row) = (i % l.columns, (i / l.columns) as isize + first_row);
             let min = origin + Vec2::new(col as f32 * (cell.x + GAP), row as f32 * (cell.y + GAP));
             let image_rect = Rect::from_min_size(min, Vec2::new(l.image_w, l.image_h));
             let response = ui.interact(
@@ -4530,18 +4550,27 @@ impl Viewer {
             }
             // Marked to move in the single view: the same mark (it changes
             // nothing in the grid).
-            if self.lib.settings.grid_move_marks
-                && self.move_grid.is_none()
-                && self.marked.contains(path)
-            {
+            let mark = if self.move_grid.is_some() {
+                self.lib.settings.move_grid_marks
+            } else {
+                self.lib.settings.grid_move_marks
+            };
+            if mark && self.marked.contains(path) {
                 paint_move_mark(&painter, image_rect.left_top() + Vec2::splat(8.));
             }
             // The Move grid: × at the corner takes the image off the marks.
             if self.move_grid.is_some() {
                 let s = &self.lib.settings;
                 let size = s.move_x_size.clamp(12., 48.);
-                let x =
-                    Rect::from_min_size(image_rect.left_top() + Vec2::splat(6.), Vec2::splat(size));
+                // In the corner chosen, inside the image box at any size.
+                let inner = image_rect.shrink(6.);
+                let corner = match s.move_x_corner.as_str() {
+                    "top_left" => inner.left_top(),
+                    "bottom_left" => inner.left_bottom() - Vec2::new(0., size),
+                    "bottom_right" => inner.right_bottom() - Vec2::splat(size),
+                    _ => inner.right_top() - Vec2::new(size, 0.),
+                };
+                let x = Rect::from_min_size(corner, Vec2::splat(size));
                 let r = ui
                     .interact(x, ui.id().with(("move_x", path)), Sense::click())
                     .on_hover_text("Take off the marked images");
@@ -4752,9 +4781,6 @@ impl Viewer {
     }
     /// Page size in use (see `grid_layout::effective`).
     fn grid_count(&self) -> usize {
-        if self.move_grid_all() {
-            return self.visible.len().max(1);
-        }
         crate::grid_layout::effective(
             self.page_size_setting(),
             self.round_full_setting(),
@@ -4762,9 +4788,15 @@ impl Viewer {
             self.grid_area,
         )
     }
-    /// The Move grid shows all marked images on one scrolling page.
+    /// The Move grid shows all marked images on one page that goes on
+    /// downwards: the next page (or row) slides up instead of a page turn.
     fn move_grid_all(&self) -> bool {
         self.move_grid.is_some() && self.lib.settings.move_grid_all
+    }
+    /// Pages follow the list in order (In order pages, or the Move grid's
+    /// one page).
+    fn sequential_pages(&self) -> bool {
+        self.lib.settings.grid_page_order == crate::model::Order::Sequential || self.move_grid_all()
     }
     /// Page size and rounding: the Move grid has its own.
     fn page_size_setting(&self) -> usize {
@@ -5947,7 +5979,7 @@ impl Viewer {
     fn page_paths(&mut self) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let count = self.grid_count();
         let order = self.lib.settings.grid_page_order;
-        if order == crate::model::Order::Sequential {
+        if self.sequential_pages() {
             let page = |start: usize| {
                 self.visible
                     .iter()
@@ -5971,7 +6003,30 @@ impl Viewer {
     fn grid_page(&mut self, next: bool) {
         self.preview = None;
         let count = self.grid_count();
-        if self.lib.settings.grid_page_order != crate::model::Order::Sequential {
+        if self.move_grid_all() {
+            // One page going on: a page (or a row) further, sliding.
+            let columns = self.grid_columns.max(1);
+            let step = if self.lib.settings.move_grid_row {
+                columns
+            } else {
+                count.div_ceil(columns) * columns
+            };
+            let rows = count.div_ceil(columns);
+            let last = self.visible.len().div_ceil(columns).saturating_sub(rows) * columns;
+            let start = self.grid_start / columns * columns;
+            let to = if next {
+                (start + step).min(last)
+            } else {
+                start.saturating_sub(step)
+            };
+            if to != start {
+                let moved = (to as f32 - start as f32) / columns as f32;
+                self.move_grid_scroll += moved * self.grid_row_height;
+                self.grid_start = to;
+            }
+            return;
+        }
+        if !self.sequential_pages() {
             // Everything fits on one page: there is no other page to show.
             if self.visible.len() <= count {
                 return;
@@ -6051,8 +6106,8 @@ impl Viewer {
         let all = self.move_grid_all();
         let moving = self.move_grid.is_some();
         let shown = |item: GridItem| match item {
-            // One scrolling page: no pages, no page size.
-            PrevPage | NextPage | Size | Presets if all => false,
+            // One page going on downwards: the arrows step it.
+            PrevPage | NextPage if all => true,
             Folder | FloatingTrash if moving => false,
             _ => shown(item),
         };
@@ -6244,7 +6299,7 @@ impl Viewer {
     fn grid_item(&mut self, ui: &mut egui::Ui, item: GridItem, icons: bool, count: usize) {
         use GridItem::*;
         let fixed = self.lib.settings.grid_bar_fixed_width;
-        let ordered = self.lib.settings.grid_page_order == crate::model::Order::Sequential;
+        let ordered = self.sequential_pages();
         // The Move grid selects in normal mode too (a click shows the image).
         let selecting =
             (!self.grid_normal || self.move_grid.is_some()) && !self.busy && !self.view_pending;
@@ -6441,29 +6496,6 @@ impl Viewer {
                     self.changed();
                 }
             }
-            MoveMarked => {
-                let selected = self
-                    .delete_selection
-                    .iter()
-                    .filter(|p| self.visible.position(p).is_some())
-                    .count();
-                let tip = if selected > 0 {
-                    format!("Move the {selected} selected images")
-                } else {
-                    format!("Move all {} images", self.visible.len())
-                };
-                if b(
-                    self,
-                    ui,
-                    "move_marked",
-                    Icon::Move,
-                    &tip,
-                    false,
-                    !self.visible.is_empty() && !self.busy && !self.view_pending,
-                ) {
-                    self.move_marked();
-                }
-            }
             CancelMarked => {
                 if b(
                     self,
@@ -6495,8 +6527,7 @@ impl Viewer {
                 }
             }
             GoTo => {
-                let ordered_pages =
-                    self.lib.settings.grid_page_order == crate::model::Order::Sequential;
+                let ordered_pages = self.sequential_pages();
                 let r = self.grid_button(
                     ui,
                     icons,
@@ -6743,11 +6774,13 @@ impl Viewer {
                     response.on_hover_text("Right-click to remove");
                 }
             }
-            Move => {
+            Move | MoveMarked => {
                 vline(ui);
-                let movable = !self.files.is_empty() && !self.busy && !self.view_pending;
+                let movable = !self.visible.is_empty() && !self.busy && !self.view_pending;
+                let marked = self.move_grid.is_some();
                 let text = match (icons, self.move_mode) {
                     (_, true) => "Move the selected images (hold to stop selecting)",
+                    (true, false) if marked => "Move all marked images (hold: Move selected)",
                     (true, false) => "Move all folder images (hold: Move selected)",
                     (false, false) => "Move all…",
                 };
@@ -6848,7 +6881,7 @@ impl Viewer {
     /// one short line (timings on hover); fixed: widths that do not change
     /// from page to page.
     fn grid_status(&mut self, ui: &mut egui::Ui, count: usize, compact: bool, fixed: bool) {
-        let ordered = self.lib.settings.grid_page_order == crate::model::Order::Sequential;
+        let ordered = self.sequential_pages();
         let pages = self.visible.len().div_ceil(count).max(1);
         let suffix = if ordered {
             String::new()
@@ -7017,7 +7050,13 @@ impl Viewer {
     }
     /// A click on the grid's Move button.
     fn move_clicked(&mut self) {
-        if !self.move_mode {
+        if self.move_grid.is_some() && !(self.move_mode && !self.move_selection.is_empty()) {
+            if self.move_mode {
+                self.move_mode = false;
+            } else {
+                self.move_marked();
+            }
+        } else if !self.move_mode {
             self.move_all_clicked();
         } else if self.move_selection.is_empty() {
             self.move_mode = false;
@@ -7029,13 +7068,14 @@ impl Viewer {
                 .cloned()
                 .collect();
             let s = &self.lib.settings;
-            let plan = MovePlan::new(
+            let mut plan = MovePlan::new(
                 sources,
                 s.move_keep_names,
                 true,
                 &s.destination,
                 (s.move_digits, s.move_fill_gaps),
             );
+            plan.marked = self.move_grid.is_some();
             self.dialog = Some(Dialog::Move(plan));
         }
     }
@@ -8308,6 +8348,8 @@ impl Viewer {
             marked: true,
             ..Default::default()
         };
+        self.lib.settings.enter_move_grid_settings();
+        self.changed();
         self.grid = true;
         self.grid_normal = true;
         self.grid_viewer = None;
@@ -8325,6 +8367,8 @@ impl Viewer {
         let Some(saved) = self.move_grid.take() else {
             return;
         };
+        self.lib.settings.leave_move_grid_settings();
+        self.changed();
         self.filter = saved.filter;
         self.grid = false;
         self.grid_normal = saved.grid_normal;
@@ -8333,6 +8377,8 @@ impl Viewer {
         self.delete_selection.clear();
         self.tag_selection.clear();
         self.tag_mode = false;
+        self.move_mode = false;
+        self.move_selection.clear();
         if let Some(current) = saved.current.filter(|p| self.files.contains(p)) {
             self.current = Some(current);
         }
@@ -8352,19 +8398,10 @@ impl Viewer {
             self.exit_move_grid();
         }
     }
-    /// The Move grid's Move: the selected images, or all marked ones.
+    /// The Move grid's Move: all marked images (Move selected mode, as in
+    /// the grid, moves the chosen ones).
     fn move_marked(&mut self) {
-        let chosen: Vec<PathBuf> = self
-            .visible
-            .iter()
-            .filter(|p| self.delete_selection.contains(*p))
-            .cloned()
-            .collect();
-        let sources = if chosen.is_empty() {
-            self.visible.to_vec()
-        } else {
-            chosen
-        };
+        let sources = self.visible.to_vec();
         if sources.is_empty() {
             return;
         }
@@ -8771,6 +8808,12 @@ impl Viewer {
         actions: &mut Vec<&'static str>,
     ) {
         ui.heading("Settings");
+        if self.move_grid.is_some() {
+            ui.label(
+                RichText::new("The Move grid is open: the grid's settings here (hover preview, circles, page order, selections, bar…) are the Move grid's own. The grid's come back when it closes.")
+                    .color(MOVE_BLUE),
+            );
+        }
         self.profile_row(ui);
         ui.horizontal_wrapped(|ui| {
             for (i, name) in [
@@ -9106,35 +9149,44 @@ impl Viewer {
                     if h.button(ui, "Pages", !s.move_grid_all, true, false) {
                         s.move_grid_all = false;
                     }
-                    if h.button(ui, "All on one page (scroll)", s.move_grid_all, true, false) {
+                    if h.button(
+                        ui,
+                        "All on one page (scrolls on)",
+                        s.move_grid_all,
+                        true,
+                        false,
+                    ) {
                         s.move_grid_all = true;
                     }
                 });
-                ui.add_enabled_ui(!s.move_grid_all, |ui| {
-                    h.slider(
-                        ui,
-                        &mut s.move_grid_count,
-                        1..=crate::grid_layout::MAX_COUNT,
-                        "Images per page",
-                    );
+                h.slider(
+                    ui,
+                    &mut s.move_grid_count,
+                    1..=crate::grid_layout::MAX_COUNT,
+                    "Images per page",
+                );
+                h.check(
+                    ui,
+                    &mut s.move_grid_round_full,
+                    "Round page size up to fill the grid",
+                );
+                ui.add_enabled_ui(s.move_grid_all, |ui| {
                     h.check(
                         ui,
-                        &mut s.move_grid_round_full,
-                        "Round page size up to fill the grid",
+                        &mut s.move_grid_row,
+                        "One row at a time (instead of a page)",
                     );
                 });
-                ui.add_enabled_ui(s.move_grid_all, |ui| {
-                    h.slider(
-                        ui,
-                        &mut s.marked_thumb_px,
-                        40.0..=480.0,
-                        "Thumbnail height on the scrolling page (px)",
-                    );
-                });
+                ui.label(RichText::new("All on one page: the page goes on downwards; the wheel and the page arrows bring the next page (or row) up instead of turning the page.").color(MUTED));
                 h.check(
                     ui,
                     &mut s.move_grid_browse,
                     "The big image from the Move grid browses the marked images",
+                );
+                h.check(
+                    ui,
+                    &mut s.move_grid_marks,
+                    "Show the \"✔ MOVE\" mark on the Move grid's thumbnails",
                 );
                 ui.horizontal_wrapped(|ui| {
                     ui.label("× on the thumbnails: colour");
@@ -9142,6 +9194,19 @@ impl Viewer {
                     let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                     if ui.color_edit_button_srgba(&mut color).changed() {
                         s.move_x_color = color.to_srgba_unmultiplied();
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("× place");
+                    for (value, label) in [
+                        ("top_left", "Top left"),
+                        ("top_right", "Top right"),
+                        ("bottom_left", "Bottom left"),
+                        ("bottom_right", "Bottom right"),
+                    ] {
+                        if h.button(ui, label, s.move_x_corner == value, true, false) {
+                            s.move_x_corner = value.to_owned();
+                        }
                     }
                 });
                 h.slider(ui, &mut s.move_x_size, 12.0..=48.0, "× size (px)");
@@ -10726,6 +10791,14 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                     let label = if plan.one { "Move image" } else { "Move images" };
                     if self.hover.button(ui, label, false, ready && !self.busy && !self.view_pending, true) {
                         if let Ok(items) = plan.items.clone() {
+                            // The move starts before the view changes: a view
+                            // being built holds moves back.
+                            if operations::conflicts(&items) {
+                                self.dialog = Some(Dialog::Conflict(items));
+                            } else {
+                                self.start_move(items, Conflict::Cancel);
+                                close = true;
+                            }
                             if plan.marked {
                                 // The moved images leave the marks; the rest
                                 // stay marked if only some were moved.
@@ -10739,12 +10812,6 @@ if self.hover.button(ui,"OK",false,true,false){close=true;}},
                                 self.move_mode = false;
                                 self.move_selection.clear();
                                 self.marks_changed(false);
-                            }
-                            if operations::conflicts(&items) {
-                                self.dialog = Some(Dialog::Conflict(items));
-                            } else {
-                                self.start_move(items, Conflict::Cancel);
-                                close = true;
                             }
                         }
                     }
@@ -11662,7 +11729,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         let big = self.grid_viewer.is_some();
         let wheel_active = !blocked
             && (!big || self.big_browse())
-            && (!self.grid || big || (s.grid_wheel_pages && !self.move_grid_all()))
+            && (!self.grid || big || s.grid_wheel_pages || self.move_grid_all())
             && !self.visible.is_empty()
             && pos
                 .and_then(|p| ctx.layer_id_at(p))
@@ -13584,8 +13651,6 @@ mod tests {
         v.set_grid_count(3);
         assert_eq!(v.lib.settings.move_grid_count, 3);
         assert_eq!(v.lib.settings.thumbnail_count, 9);
-        v.lib.settings.move_grid_all = true;
-        assert_eq!(v.grid_count(), 3, "all on one page");
         // Its bar: the grid's controls that apply and its own.
         let (items, _) = v.grid_items(true);
         for item in [
@@ -13599,7 +13664,6 @@ mod tests {
         ] {
             assert!(items.contains(&item), "{item:?}");
         }
-        assert!(!items.contains(&GridItem::Size), "no page size on one page");
         // × takes one off; Move moves the selected (none: all).
         v.take_off_marked(&files[2]);
         finish_view(&mut v, &ctx);
@@ -13613,43 +13677,67 @@ mod tests {
             _ => panic!("no Move dialog"),
         }
         v.dialog = None;
-        v.delete_selection.insert(files[3].clone());
-        v.move_marked();
+        // Images chosen for deleting are not moved; Move selected mode (as
+        // in the grid) moves the chosen ones.
+        v.delete_selection.insert(files[0].clone());
+        v.move_clicked();
         let Some(Dialog::Move(plan)) = &v.dialog else {
             panic!("no Move dialog");
         };
+        assert_eq!(plan.sources.len(), 2, "all, not the ones to delete");
+        v.dialog = None;
+        v.delete_selection.clear();
+        v.toggle_move_mode();
+        v.move_selection.insert(files[3].clone());
+        v.move_clicked();
+        let Some(Dialog::Move(plan)) = &v.dialog else {
+            panic!("no Move dialog");
+        };
+        assert!(plan.marked);
         assert_eq!(plan.sources, vec![files[3].clone()]);
         v.dialog = None;
-        // All on one page: the tiles scroll with the wheel.
+        v.toggle_move_mode();
+        // All on one page: the page goes on, a page or a row at a time.
         for p in &files {
             if !v.marked.contains(p) {
                 v.toggle_mark(p);
             }
         }
         finish_view(&mut v, &ctx);
-        v.lib.settings.marked_thumb_px = 300.;
-        let frame = |v: &mut Viewer, events: Vec<egui::Event>| {
+        v.lib.settings.move_grid_all = true;
+        v.lib.settings.move_grid_count = 2;
+        let (items, _) = v.grid_items(true);
+        assert!(items.contains(&GridItem::Size) && items.contains(&GridItem::NextPage));
+        let frame = |v: &mut Viewer| {
             let raw = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280., 820.))),
-                events,
                 ..Default::default()
             };
             let _ = ctx.run(raw, |ctx| v.central(ctx));
         };
-        let at = Pos2::new(640., 300.);
-        frame(&mut v, vec![egui::Event::PointerMoved(at)]);
-        for _ in 0..20 {
-            frame(
-                &mut v,
-                vec![egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: Vec2::new(0., -200.),
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
+        frame(&mut v);
+        let columns = v.grid_columns;
+        assert!(columns >= 1 && v.grid_count() == 2);
+        let page = 2usize.div_ceil(columns) * columns;
+        v.grid_page(true);
+        assert_eq!(
+            v.grid_start,
+            page.min(
+                6usize
+                    .div_ceil(columns)
+                    .saturating_sub(2usize.div_ceil(columns))
+                    * columns
+            )
+        );
+        assert!(v.move_grid_scroll > 0., "slides up into place");
+        v.grid_page(false);
+        assert_eq!(v.grid_start, 0);
+        v.lib.settings.move_grid_row = true;
+        v.grid_page(true);
+        assert!(v.grid_start <= columns, "one row");
+        for _ in 0..40 {
+            frame(&mut v);
         }
-        assert!(v.move_grid_scroll > 0., "scrolled down");
-        assert!(v.move_grid.is_some() && v.grid_count() == v.visible.len());
         // Cancel: the image view as it was, the marks kept.
         v.exit_move_grid();
         finish_view(&mut v, &ctx);

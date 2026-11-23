@@ -421,14 +421,23 @@ pub struct Settings {
     pub move_pos: Option<[f32; 2]>,
     pub move_color: [u8; 4],
     /// The marked images' Move grid (a grid of only them): its own page
-    /// size and rounding, or all of them on one scrolling page with
-    /// thumbnails this high; the big image browses the marked images.
-    pub marked_thumb_px: f32,
+    /// size and rounding, or one page going on downwards; the big image
+    /// browses the marked images.
     pub move_grid_count: usize,
     pub move_grid_round_full: bool,
     pub move_grid_all: bool,
     pub move_grid_browse: bool,
-    /// The × at each thumbnail's corner there: fill colour, size, opacity.
+    /// The Move grid's tiles show the "✔ MOVE" mark too; one page that
+    /// moves a row at a time (all on one page).
+    pub move_grid_marks: bool,
+    pub move_grid_row: bool,
+    /// The × on the tiles there: its corner ("top_left", "top_right",
+    /// "bottom_left", "bottom_right"), fill colour, size, opacity.
+    pub move_x_corner: String,
+    /// The Move grid's own values of the grid's settings (`MOVE_GRID_OWN`),
+    /// and while it is open the grid's values it replaced.
+    pub move_grid_own: serde_json::Map<String, serde_json::Value>,
+    pub grid_own_saved: Option<serde_json::Map<String, serde_json::Value>>,
     pub move_x_color: [u8; 4],
     pub move_x_size: f32,
     pub move_x_opacity: f32,
@@ -629,11 +638,15 @@ impl Default for Settings {
             active_profile: String::new(),
             move_pos: None,
             move_color: [38, 84, 150, 235],
-            marked_thumb_px: 120.,
             move_grid_count: 12,
             move_grid_round_full: true,
             move_grid_all: false,
             move_grid_browse: true,
+            move_grid_marks: false,
+            move_grid_row: false,
+            move_x_corner: "top_right".into(),
+            move_grid_own: serde_json::Map::new(),
+            grid_own_saved: None,
             move_x_color: [20, 24, 30, 255],
             move_x_size: 22.,
             move_x_opacity: 0.9,
@@ -764,16 +777,79 @@ impl Settings {
             _ => serde_json::Map::new(),
         };
         values.retain(|k, _| !PROFILE_EXCLUDED.contains(&k.as_str()));
+        // With the Move grid open, the grid's own values (not the Move
+        // grid's) belong to the profile.
+        if let Some(saved) = &self.grid_own_saved {
+            for (k, v) in saved {
+                values.insert(k.clone(), v.clone());
+            }
+        }
         values
     }
     /// Sets the profile's settings; settings it does not have (newer than
     /// the profile) and values this version cannot read stay as they are.
     pub fn apply_profile_values(&mut self, values: &serde_json::Map<String, serde_json::Value>) {
+        // With the Move grid open, the grid's settings go to the grid's
+        // values kept aside; the Move grid keeps its own.
+        let open = self.grid_own_saved.is_some();
+        if let Some(saved) = &mut self.grid_own_saved {
+            for (k, v) in values {
+                if saved.contains_key(k) {
+                    saved.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        self.set_values(values, |k| {
+            !PROFILE_EXCLUDED.contains(&k) && !(open && MOVE_GRID_OWN.contains(&k))
+        });
+        self.initialize_after_load();
+    }
+    /// These settings, by their saved names.
+    fn values_of(&self, keys: &[&str]) -> serde_json::Map<String, serde_json::Value> {
+        let mut values = match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        values.retain(|k, _| keys.contains(&k.as_str()));
+        values
+    }
+    /// The Move grid opens: its own values of the grid's settings replace
+    /// the grid's (kept to come back; first time: the grid's own).
+    pub fn enter_move_grid_settings(&mut self) {
+        if self.grid_own_saved.is_some() {
+            return;
+        }
+        let grid = self.values_of(MOVE_GRID_OWN);
+        let mut own = grid.clone();
+        for (k, v) in &self.move_grid_own {
+            if own.contains_key(k) {
+                own.insert(k.clone(), v.clone());
+            }
+        }
+        self.set_values(&own, |k| MOVE_GRID_OWN.contains(&k));
+        self.grid_own_saved = Some(grid);
+    }
+    /// The Move grid closes (or NoirView starts after closing with it open):
+    /// its values are kept and the grid's come back.
+    pub fn leave_move_grid_settings(&mut self) {
+        let Some(grid) = self.grid_own_saved.take() else {
+            return;
+        };
+        self.move_grid_own = self.values_of(MOVE_GRID_OWN);
+        self.set_values(&grid, |k| MOVE_GRID_OWN.contains(&k));
+    }
+    /// Sets the values whose names `allowed` takes, each only when this
+    /// version has and can read it.
+    fn set_values(
+        &mut self,
+        values: &serde_json::Map<String, serde_json::Value>,
+        allowed: impl Fn(&str) -> bool,
+    ) {
         let Ok(serde_json::Value::Object(mut current)) = serde_json::to_value(&*self) else {
             return;
         };
         for (key, value) in values {
-            if PROFILE_EXCLUDED.contains(&key.as_str()) || !current.contains_key(key) {
+            if !allowed(key) || !current.contains_key(key) {
                 continue;
             }
             let old = current.insert(key.clone(), value.clone());
@@ -788,7 +864,6 @@ impl Settings {
         if let Ok(settings) = serde_json::from_value::<Settings>(serde_json::Value::Object(current))
         {
             *self = settings;
-            self.initialize_after_load();
         }
     }
     /// A profile's settings: a saved one, or the defaults for "Default".
@@ -895,6 +970,8 @@ pub const PROFILE_EXCLUDED: &[&str] = &[
     "profiles",
     "active_profile",
     "dialog_places",
+    "move_grid_own",
+    "grid_own_saved",
     "delete_pos",
     "move_pos",
     "favorite_places",
@@ -974,6 +1051,53 @@ pub struct FolderPlace {
     pub order: Order,
     pub seen: Vec<PathBuf>,
 }
+
+/// The grid's settings the Move grid has its own values of (Settings show
+/// and change those while the Move grid is open).
+pub const MOVE_GRID_OWN: &[&str] = &[
+    "grid_hover_preview",
+    "hover_preview_ms",
+    "preview_size",
+    "preview_close_px",
+    "preview_close_ms",
+    "preview_close_top",
+    "preview_close_left",
+    "preview_close_right",
+    "preview_close_click",
+    "preview_close_move_px",
+    "preview_close_move_dir",
+    "hover_circle",
+    "hover_circle_pct",
+    "hover_circle_reveal_px",
+    "hover_circle_fade",
+    "hover_circle_opacity",
+    "hover_circle_always",
+    "hover_circle_width",
+    "grid_page_arrows",
+    "grid_bar_bottom",
+    "grid_bar_fixed_width",
+    "grid_bar_colors",
+    "grid_show_marks",
+    "grid_marks_icons",
+    "grid_keep_tag_mode",
+    "grid_hold_ms",
+    "selection_flash",
+    "selection_toast",
+    "selection_toast_size",
+    "selection_toast_width",
+    "selection_toast_height",
+    "normal_keeps_selection",
+    "grid_page_order",
+    "grid_random_both",
+    "grid_presets",
+    "grid_wheel_pages",
+    "grid_page_wrap",
+    "grid_caption_range",
+    "grid_caption_folder",
+    "grid_caption_count",
+    "magnify_on_move",
+    "magnify_at_once",
+];
 
 /// A favorite folder: its name in the list (empty: the folder's name).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1595,6 +1719,51 @@ mod tests {
         assert_eq!(other.thumbnail_cache_dir, PathBuf::from("/other-cache"));
         assert_eq!(other.destination, PathBuf::from("/other"));
         assert!(other.watched_folders.is_empty());
+    }
+    #[test]
+    fn the_move_grid_has_its_own_grid_settings() {
+        // Every name is a real setting.
+        let all = serde_json::to_value(Settings::default()).unwrap();
+        for key in MOVE_GRID_OWN {
+            assert!(all.get(*key).is_some(), "{key} is not a setting");
+        }
+        let mut s = Settings {
+            hover_preview_ms: 400,
+            grid_wheel_pages: true,
+            ..Settings::default()
+        };
+        // First time: the grid's values; changes stay the Move grid's.
+        s.enter_move_grid_settings();
+        assert_eq!(s.hover_preview_ms, 400);
+        s.hover_preview_ms = 900;
+        s.grid_wheel_pages = false;
+        // A profile saved meanwhile holds the grid's values.
+        assert_eq!(
+            s.profile_values()["hover_preview_ms"],
+            serde_json::json!(400)
+        );
+        s.leave_move_grid_settings();
+        assert_eq!(s.hover_preview_ms, 400);
+        assert!(s.grid_wheel_pages);
+        // Next time the Move grid's come back.
+        s.enter_move_grid_settings();
+        assert_eq!(s.hover_preview_ms, 900);
+        assert!(!s.grid_wheel_pages);
+        // Saved while open (NoirView closed): read back, the grid's again.
+        let mut read: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        read.leave_move_grid_settings();
+        assert_eq!(read.hover_preview_ms, 400);
+        assert_eq!(
+            read.move_grid_own["hover_preview_ms"],
+            serde_json::json!(900)
+        );
+        // A profile applied while open changes the grid's values only.
+        let mut values = serde_json::Map::new();
+        values.insert("hover_preview_ms".into(), serde_json::json!(50));
+        s.apply_profile_values(&values);
+        assert_eq!(s.hover_preview_ms, 900);
+        s.leave_move_grid_settings();
+        assert_eq!(s.hover_preview_ms, 50);
     }
     #[test]
     fn a_profile_from_another_version_sets_what_it_can() {
