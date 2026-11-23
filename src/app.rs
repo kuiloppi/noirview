@@ -748,6 +748,77 @@ fn dialog_guid(kind: &str) -> u128 {
     0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000 + index as u128
 }
 
+/// A corner choice and the offset from it (Settings).
+fn corner_controls(
+    ui: &mut egui::Ui,
+    h: &mut Hover,
+    label: &str,
+    corner: &mut String,
+    offset: &mut [f32; 2],
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(label);
+        for (value, name) in [
+            ("top_left", "Top left"),
+            ("top_right", "Top right"),
+            ("bottom_left", "Bottom left"),
+            ("bottom_right", "Bottom right"),
+        ] {
+            if h.button(ui, name, corner == value, true, false) {
+                *corner = value.to_owned();
+            }
+        }
+    });
+    h.slider(
+        ui,
+        &mut offset[0],
+        0.0..=400.0,
+        &format!("{label}: in from the side (px)"),
+    );
+    h.slider(
+        ui,
+        &mut offset[1],
+        0.0..=400.0,
+        &format!("{label}: in from the top / bottom (px)"),
+    );
+}
+/// Where something of `size` goes in `inner`: at a corner ("top_left",
+/// "top_right", "bottom_left", "bottom_right"), moved in by `offset`
+/// (right / down from a left / top corner, left / up from the others),
+/// kept inside.
+fn corner_place(inner: Rect, size: Vec2, corner: &str, offset: [f32; 2]) -> Pos2 {
+    let (right, bottom) = match corner {
+        "top_right" => (true, false),
+        "bottom_left" => (false, true),
+        "bottom_right" => (true, true),
+        _ => (false, false),
+    };
+    let x = if right {
+        inner.right() - size.x - offset[0]
+    } else {
+        inner.left() + offset[0]
+    };
+    let y = if bottom {
+        inner.bottom() - size.y - offset[1]
+    } else {
+        inner.top() + offset[1]
+    };
+    Pos2::new(
+        x.clamp(inner.left(), (inner.right() - size.x).max(inner.left())),
+        y.clamp(inner.top(), (inner.bottom() - size.y).max(inner.top())),
+    )
+}
+/// The size of the "✔ MOVE" mark.
+fn move_mark_size(painter: &egui::Painter) -> Vec2 {
+    painter
+        .layout_no_wrap(
+            "✔ MOVE".to_owned(),
+            egui::FontId::proportional(13.),
+            Color32::WHITE,
+        )
+        .size()
+        + Vec2::new(16., 8.)
+}
 /// The mark of an image marked to move: a blue tag with a check mark.
 fn paint_move_mark(painter: &egui::Painter, at: Pos2) {
     let galley = painter.layout_no_wrap(
@@ -1637,6 +1708,9 @@ pub struct Viewer {
     settings_snapshot: Option<Box<Settings>>,
     /// Where the button popup was drawn last frame.
     popup_rect: Option<Rect>,
+    /// Settings show the Move grid's grid settings (swapped in while the
+    /// Move grid is not open).
+    settings_move_target: bool,
     /// A profile to switch to (Settings or the right-click menu).
     pending_profile: Option<String>,
     /// Naming a profile: the one renamed (none: a new one) and the text.
@@ -1905,6 +1979,7 @@ impl Viewer {
             backend_checked: false,
             settings_snapshot: None,
             popup_rect: None,
+            settings_move_target: false,
             pending_profile: None,
             profile_edit: None,
             favorite_anchor: None,
@@ -4556,21 +4631,33 @@ impl Viewer {
                 self.lib.settings.grid_move_marks
             };
             if mark && self.marked.contains(path) {
-                paint_move_mark(&painter, image_rect.left_top() + Vec2::splat(8.));
+                let at = if self.move_grid.is_some() {
+                    // Where set (corner and offset), inside the image box.
+                    let s = &self.lib.settings;
+                    corner_place(
+                        image_rect.shrink(6.),
+                        move_mark_size(&painter),
+                        &s.move_mark_corner,
+                        s.move_mark_offset,
+                    )
+                } else {
+                    image_rect.left_top() + Vec2::splat(8.)
+                };
+                paint_move_mark(&painter, at);
             }
             // The Move grid: × at the corner takes the image off the marks.
             if self.move_grid.is_some() {
                 let s = &self.lib.settings;
                 let size = s.move_x_size.clamp(12., 48.);
-                // In the corner chosen, inside the image box at any size.
-                let inner = image_rect.shrink(6.);
-                let corner = match s.move_x_corner.as_str() {
-                    "top_left" => inner.left_top(),
-                    "bottom_left" => inner.left_bottom() - Vec2::new(0., size),
-                    "bottom_right" => inner.right_bottom() - Vec2::splat(size),
-                    _ => inner.right_top() - Vec2::new(size, 0.),
-                };
-                let x = Rect::from_min_size(corner, Vec2::splat(size));
+                // In the corner chosen and moved in as set, inside the image
+                // box at any size.
+                let at = corner_place(
+                    image_rect.shrink(6.),
+                    Vec2::splat(size),
+                    &s.move_x_corner,
+                    s.move_x_offset,
+                );
+                let x = Rect::from_min_size(at, Vec2::splat(size));
                 let r = ui
                     .interact(x, ui.id().with(("move_x", path)), Sense::click())
                     .on_hover_text("Take off the marked images");
@@ -8349,6 +8436,7 @@ impl Viewer {
             ..Default::default()
         };
         self.lib.settings.enter_move_grid_settings();
+        self.settings_move_target = false;
         self.changed();
         self.grid = true;
         self.grid_normal = true;
@@ -8554,6 +8642,29 @@ impl Viewer {
             self.changed();
         }
     }
+    /// The Move grid open: a frame round the whole window (option).
+    fn move_grid_frame(&self, ctx: &egui::Context) {
+        let s = &self.lib.settings;
+        if self.move_grid.is_none() || !s.move_grid_frame {
+            return;
+        }
+        let width = s.move_grid_frame_width.clamp(1., 24.);
+        let c = s.move_grid_frame_color;
+        let alpha = (c[3] as f32 * s.move_grid_frame_opacity.clamp(0.05, 1.)) as u8;
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            Id::new("move_grid_frame"),
+        ))
+        .rect_stroke(
+            ctx.screen_rect(),
+            0.,
+            Stroke::new(
+                width,
+                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], alpha),
+            ),
+            egui::StrokeKind::Inside,
+        );
+    }
     /// What the floating trash button moves to the Recycle Bin: the grid's
     /// selection (like the grid's own Trash button), the image shown big from
     /// the grid, or the current image. Empty means the button does nothing.
@@ -8737,6 +8848,7 @@ impl Viewer {
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.settings {
             self.settings_snapshot = None;
+            self.edit_grid_settings_of(false);
             return;
         }
         // What Cancel goes back to.
@@ -8808,9 +8920,24 @@ impl Viewer {
         actions: &mut Vec<&'static str>,
     ) {
         ui.heading("Settings");
-        if self.move_grid.is_some() {
+        // Which grid the grid settings here belong to.
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Grid settings of");
+            let open = self.move_grid.is_some();
+            let moving = open || self.settings_move_target;
+            if self.hover.button(ui, "Grid", !moving, !open, false) {
+                self.edit_grid_settings_of(false);
+            }
+            if self
+                .hover
+                .button(ui, "Move grid (marked images)", moving, !open, false)
+            {
+                self.edit_grid_settings_of(true);
+            }
+        });
+        if self.move_grid.is_some() || self.settings_move_target {
             ui.label(
-                RichText::new("The Move grid is open: the grid's settings here (hover preview, circles, page order, selections, bar…) are the Move grid's own. The grid's come back when it closes.")
+                RichText::new("The grid's settings here (hover preview, circles, page order, selections, bar…) are the Move grid's own; the grid keeps its own.")
                     .color(MOVE_BLUE),
             );
         }
@@ -9196,18 +9323,40 @@ impl Viewer {
                         s.move_x_color = color.to_srgba_unmultiplied();
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("× place");
-                    for (value, label) in [
-                        ("top_left", "Top left"),
-                        ("top_right", "Top right"),
-                        ("bottom_left", "Bottom left"),
-                        ("bottom_right", "Bottom right"),
-                    ] {
-                        if h.button(ui, label, s.move_x_corner == value, true, false) {
-                            s.move_x_corner = value.to_owned();
+                corner_controls(ui, h, "× place", &mut s.move_x_corner, &mut s.move_x_offset);
+                corner_controls(
+                    ui,
+                    h,
+                    "\"✔ MOVE\" mark place",
+                    &mut s.move_mark_corner,
+                    &mut s.move_mark_offset,
+                );
+                h.check(
+                    ui,
+                    &mut s.move_grid_frame,
+                    "A frame round the window while the Move grid is open",
+                );
+                ui.add_enabled_ui(s.move_grid_frame, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Frame colour");
+                        let c = s.move_grid_frame_color;
+                        let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            s.move_grid_frame_color = color.to_srgba_unmultiplied();
                         }
-                    }
+                    });
+                    h.slider(
+                        ui,
+                        &mut s.move_grid_frame_width,
+                        1.0..=24.0,
+                        "Frame width (px)",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.move_grid_frame_opacity,
+                        0.05..=1.0,
+                        "Frame opacity",
+                    );
                 });
                 h.slider(ui, &mut s.move_x_size, 12.0..=48.0, "× size (px)");
                 h.slider(ui, &mut s.move_x_opacity, 0.1..=1.0, "× opacity");
@@ -10639,9 +10788,26 @@ impl Viewer {
             None => self.profile_edit = Some((renamed, text)),
         }
     }
+    /// Settings edit the grid's or the Move grid's grid settings. With the
+    /// Move grid closed its values are swapped in while Settings show them.
+    fn edit_grid_settings_of(&mut self, move_grid: bool) {
+        if self.move_grid.is_some() || move_grid == self.settings_move_target {
+            return;
+        }
+        self.settings_move_target = move_grid;
+        if move_grid {
+            self.lib.settings.enter_move_grid_settings();
+        } else {
+            self.lib.settings.leave_move_grid_settings();
+        }
+        self.images.invalidate();
+        self.changed();
+    }
     /// Settings' Cancel: back to the settings as they were when the window
     /// opened, and close it.
     fn cancel_settings(&mut self) {
+        // The snapshot is from before any swap.
+        self.settings_move_target = false;
         if let Some(before) = self.settings_snapshot.take() {
             let sort = (before.sort_key, before.sort_descending)
                 != (
@@ -11960,6 +12126,7 @@ impl eframe::App for Viewer {
         self.tag_favorite_chooser(ctx);
         self.floating_delete(ctx);
         self.floating_move(ctx);
+        self.move_grid_frame(ctx);
         self.record_place();
         self.info_window(ctx);
         self.recent_window(ctx);
@@ -13746,6 +13913,75 @@ mod tests {
         assert_eq!(v.current.as_ref(), Some(&files[4]));
         assert_eq!(v.marked.len(), 6, "all marked for the scrolling page");
         assert!(v.delete_selection.is_empty());
+    }
+    #[test]
+    fn the_x_and_the_mark_go_to_their_corner_moved_in_as_set() {
+        let inner = Rect::from_min_size(Pos2::new(100., 100.), Vec2::new(300., 200.));
+        let size = Vec2::new(20., 20.);
+        assert_eq!(
+            corner_place(inner, size, "top_left", [0., 0.]),
+            Pos2::new(100., 100.)
+        );
+        assert_eq!(
+            corner_place(inner, size, "top_left", [0., 30.]),
+            Pos2::new(100., 130.)
+        );
+        assert_eq!(
+            corner_place(inner, size, "top_right", [5., 0.]),
+            Pos2::new(375., 100.)
+        );
+        assert_eq!(
+            corner_place(inner, size, "bottom_right", [0., 0.]),
+            Pos2::new(380., 280.)
+        );
+        assert_eq!(
+            corner_place(inner, size, "bottom_left", [10., 10.]),
+            Pos2::new(110., 270.)
+        );
+        // Kept inside however far.
+        assert_eq!(
+            corner_place(inner, size, "top_left", [999., 999.]),
+            Pos2::new(380., 280.)
+        );
+        let d = Settings::default();
+        assert_eq!(
+            (d.move_x_corner.as_str(), d.move_mark_corner.as_str()),
+            ("top_left", "top_left")
+        );
+        assert!(
+            d.move_mark_offset[1] >= d.move_x_size,
+            "the mark below the × by default"
+        );
+    }
+    #[test]
+    fn the_move_grids_settings_can_be_changed_without_it() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        v.lib.settings.hover_preview_ms = 400;
+        v.settings = true;
+        v.edit_grid_settings_of(true);
+        assert_eq!(
+            v.lib.settings.hover_preview_ms, 400,
+            "first time: the grid's"
+        );
+        v.lib.settings.hover_preview_ms = 1200;
+        v.edit_grid_settings_of(false);
+        assert_eq!(v.lib.settings.hover_preview_ms, 400);
+        // Settings closed while showing the Move grid's: they are kept.
+        v.edit_grid_settings_of(true);
+        assert_eq!(v.lib.settings.hover_preview_ms, 1200);
+        v.settings = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| v.settings_window(ctx));
+        assert_eq!(v.lib.settings.hover_preview_ms, 400);
+        assert!(!v.settings_move_target);
+        // And used when the Move grid opens.
+        v.marking = true;
+        let first = v.files[0].clone();
+        v.toggle_mark(&first);
+        v.enter_move_grid();
+        assert_eq!(v.lib.settings.hover_preview_ms, 1200);
+        v.exit_move_grid();
+        assert_eq!(v.lib.settings.hover_preview_ms, 400);
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {

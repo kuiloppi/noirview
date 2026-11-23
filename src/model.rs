@@ -434,6 +434,16 @@ pub struct Settings {
     /// The × on the tiles there: its corner ("top_left", "top_right",
     /// "bottom_left", "bottom_right"), fill colour, size, opacity.
     pub move_x_corner: String,
+    /// Moved in from the corner (px, right / down from a left / top corner).
+    pub move_x_offset: [f32; 2],
+    /// The "✔ MOVE" mark on the Move grid's tiles: corner and offset.
+    pub move_mark_corner: String,
+    pub move_mark_offset: [f32; 2],
+    /// A frame round the whole window while the Move grid is open.
+    pub move_grid_frame: bool,
+    pub move_grid_frame_width: f32,
+    pub move_grid_frame_color: [u8; 4],
+    pub move_grid_frame_opacity: f32,
     /// The Move grid's own values of the grid's settings (`MOVE_GRID_OWN`),
     /// and while it is open the grid's values it replaced.
     pub move_grid_own: serde_json::Map<String, serde_json::Value>,
@@ -644,7 +654,14 @@ impl Default for Settings {
             move_grid_browse: true,
             move_grid_marks: false,
             move_grid_row: false,
-            move_x_corner: "top_right".into(),
+            move_x_corner: "top_left".into(),
+            move_x_offset: [0., 0.],
+            move_mark_corner: "top_left".into(),
+            move_mark_offset: [0., 30.],
+            move_grid_frame: true,
+            move_grid_frame_width: 4.,
+            move_grid_frame_color: [90, 160, 255, 255],
+            move_grid_frame_opacity: 0.8,
             move_grid_own: serde_json::Map::new(),
             grid_own_saved: None,
             move_x_color: [20, 24, 30, 255],
