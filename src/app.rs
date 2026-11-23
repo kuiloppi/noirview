@@ -25,6 +25,238 @@ const RED: Color32 = Color32::from_rgb(243, 101, 121);
 const HEART_RED: Color32 = Color32::from_rgb(235, 70, 80);
 /// Move selected mode: the Move button's mark and the chosen tiles' borders.
 const MOVE_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
+/// Settings' pages, in the column at the left.
+const SETTINGS_PAGES: &[&str] = &[
+    "Image view",
+    "Browsing",
+    "Grid",
+    "Bars & buttons",
+    "Move & delete",
+    "Folders & tags",
+    "Performance",
+    "Music",
+    "Upscaling (AI)",
+    "Profiles & backup",
+    "Shortcuts & gestures",
+    "Advanced",
+];
+/// What each Settings page's Reset sets back to the defaults (lists of
+/// folders and files, chosen paths and remembered places stay).
+const SETTINGS_RESET: [&[&str]; 12] = [
+    &[
+        "display_mode",
+        "animate_gif",
+        "animation_mb",
+        "magnifier",
+        "lens_px",
+        "lens_zoom",
+        "lens_border",
+        "lens_soft_edges",
+        "lens_feather_px",
+        "lens_full_window",
+        "jpeg_preview",
+        "keep_previous_image",
+        "fullscreen_image_only",
+        "image_title_folder",
+        "path_forward_slashes",
+        "title_raise",
+    ],
+    &[
+        "order",
+        "sort_key",
+        "sort_descending",
+        "wheel_up_next",
+        "random_wheel_both",
+        "history_limit",
+        "keep_selected_tags",
+        "round_notice",
+        "round_notice_dialog",
+        "round_notice_size",
+        "round_notice_secs",
+        "round_notice_opacity",
+        "round_notice_images",
+        "round_notice_fade",
+        "round_notice_fade_ms",
+        "round_notice_place",
+        "round_notice_color",
+        "edges",
+        "side_px",
+        "side_ms",
+        "top_delete",
+        "top_px",
+        "top_ms",
+        "slideshow_secs",
+        "slideshow_order",
+        "slideshow_side_px",
+        "slideshow_side_ms",
+        "slideshow_top_px",
+        "slideshow_top_ms",
+    ],
+    &[
+        "thumbnail_count",
+        "grid_round_full",
+        "grid_page_arrows",
+        "grid_open_at_current",
+        "grid_random_both",
+        "filter_per_view",
+        "grid_wheel_pages",
+        "grid_page_wrap",
+        "confirm_preset_remove",
+        "grid_start_mode",
+        "grid_bar_icons",
+        "grid_controls_top",
+        "grid_hide_toolbar_text",
+        "grid_bar_fixed_width",
+        "grid_bar_fixed",
+        "grid_bar_bottom",
+        "grid_hide_toolbar",
+        "grid_bar_colors",
+        "grid_text_colors",
+        "grid_text_font_colors",
+        "grid_keep_tag_mode",
+        "grid_show_marks",
+        "grid_marks_icons",
+        "grid_caption_range",
+        "grid_caption_folder",
+        "grid_caption_count",
+        "grid_hover_preview",
+        "hover_preview_ms",
+        "hover_circle",
+        "hover_circle_pct",
+        "hover_circle_reveal_px",
+        "hover_circle_fade",
+        "hover_circle_always",
+        "hover_circle_opacity",
+        "hover_circle_width",
+        "preview_size",
+        "preview_close_top",
+        "preview_close_left",
+        "preview_close_right",
+        "preview_close_click",
+        "preview_close_px",
+        "preview_close_ms",
+        "preview_close_move_px",
+        "preview_close_move_dir",
+        "normal_keeps_selection",
+        "selection_flash",
+        "selection_toast",
+        "selection_toast_size",
+        "selection_toast_width",
+        "selection_toast_height",
+        "grid_viewer_browse",
+        "grid_hold_ms",
+        "magnify_on_move",
+        "magnify_at_once",
+    ],
+    &[
+        "bar_width",
+        "tags_max_width",
+        "bar_height",
+        "bar_bottom",
+        "bar_bottom_grid",
+        "bar_locked",
+        "bar_lock_universal",
+        "bar_locked_grid",
+        "bar_offset",
+        "bar_color",
+        "show_favorites_button",
+        "bar_edge_px",
+        "bar_delay_ms",
+        "bar_buttons",
+        "hover",
+        "hover_trash",
+        "hover_move",
+        "hover_settings",
+        "hover_ms",
+        "destructive_ms",
+        "hover_ring",
+        "delete_size",
+        "delete_color",
+        "delete_opacity",
+        "delete_border",
+        "delete_border_width",
+        "delete_border_color",
+        "close_angle",
+        "close_size",
+        "move_color",
+    ],
+    &[
+        "confirm_delete",
+        "confirm_restore",
+        "forget_deletion_on_close",
+        "verified_move",
+        "move_keep_names",
+        "move_digits",
+        "move_fill_gaps",
+        "move_grid_all",
+        "move_grid_count",
+        "move_grid_round_full",
+        "move_grid_row",
+        "move_grid_browse",
+        "move_grid_marks",
+        "move_x_color",
+        "move_x_corner",
+        "move_x_offset",
+        "move_mark_corner",
+        "move_mark_offset",
+        "move_grid_frame",
+        "move_grid_frame_color",
+        "move_grid_frame_width",
+        "move_grid_frame_opacity",
+        "move_x_size",
+        "move_x_opacity",
+        "grid_move_marks",
+    ],
+    &[
+        "recursive",
+        "remember_favorite_places",
+        "favorite_style",
+        "watch_folders",
+        "watch_while_active",
+        "watch_when_unfocused",
+        "watch_background",
+        "watch_pace",
+        "watch_use_journal",
+    ],
+    &[
+        "loading_mode",
+        "cache_while_active",
+        "cache_when_unfocused",
+        "proxy_cache_mb",
+        "proxy_min_side",
+        "prefetch_ahead",
+        "prefetch_behind",
+        "thumbnail_cache_mb",
+        "cache_mb",
+        "low_latency_display",
+        "graphics_backend",
+        "remember_window",
+    ],
+    &["music_shuffle", "volume"],
+    &["upscale", "upscale_factor", "sharpen", "tile_size"],
+    &[
+        "backup_exit",
+        "backup_schedule",
+        "backup_days",
+        "backup_hour",
+        "backup_minute",
+        "backup_keep",
+    ],
+    &[
+        "shortcuts",
+        "gestures",
+        "gesture_opens_tile",
+        "gesture_trail",
+        "gesture_trail_color",
+        "gesture_trail_width",
+        "gesture",
+        "gesture_min_px",
+        "gesture_max_ms",
+    ],
+    &["diagnostic_log", "window_diagnostics"],
+];
+const SETTINGS_FOLDERS: usize = 5;
+const SETTINGS_PROFILES: usize = 9;
 /// The profile choice for no profile in use.
 const NO_PROFILE: &str = "None";
 const TAG_YELLOW: Color32 = Color32::from_rgb(245, 202, 83);
@@ -221,6 +453,8 @@ enum Dialog {
     RoundDone(usize),
     /// Delete this profile?
     DeleteProfile(String),
+    /// Set this Settings page back to the defaults?
+    ResetSettingsPage(usize),
     Move(MovePlan),
     Conflict(Vec<MoveItem>),
     Restore(PathBuf),
@@ -316,8 +550,28 @@ struct Hover {
     ring: bool,
     normal: Duration,
     danger: Duration,
+    /// Settings' search (lower case): matching controls are outlined and
+    /// their labels kept in `found`.
+    search: String,
+    found: Vec<String>,
+    /// Where the first match was drawn.
+    first_found: Option<Rect>,
 }
 impl Hover {
+    /// A control whose label has the search words: outlined, listed.
+    fn found(&mut self, ui: &egui::Ui, rect: Rect, label: &str) {
+        if self.search.is_empty() || !label.to_lowercase().contains(&self.search) {
+            return;
+        }
+        self.found.push(label.to_owned());
+        self.first_found.get_or_insert(rect);
+        ui.painter().rect_stroke(
+            rect.expand(3.),
+            4.,
+            Stroke::new(1.5_f32, Color32::from_rgb(240, 200, 80)),
+            egui::StrokeKind::Outside,
+        );
+    }
     fn begin(&mut self, s: &Settings) {
         self.responses.clear();
         self.general = s.hover;
@@ -359,9 +613,12 @@ impl Hover {
         enabled: bool,
         danger: bool,
     ) -> bool {
+        let label: egui::WidgetText = label.into();
+        let text = label.text().to_owned();
         let button = egui::Button::new(label).selected(active);
-        self.watch(ui.add_enabled(enabled, button), danger)
-            .clicked()
+        let r = ui.add_enabled(enabled, button);
+        self.found(ui, r.rect, &text);
+        self.watch(r, danger).clicked()
     }
     fn icon(
         &mut self,
@@ -419,7 +676,9 @@ impl Hover {
         self.watch(response.on_hover_text(label), danger)
     }
     fn check(&mut self, ui: &mut egui::Ui, value: &mut bool, label: &str) {
-        self.watch(ui.checkbox(value, label), false);
+        let r = ui.checkbox(value, label);
+        self.found(ui, r.rect, label);
+        self.watch(r, false);
     }
     fn slider<T: egui::emath::Numeric>(
         &mut self,
@@ -428,7 +687,9 @@ impl Hover {
         range: std::ops::RangeInclusive<T>,
         label: &str,
     ) {
-        self.watch(ui.add(egui::Slider::new(value, range).text(label)), false);
+        let r = ui.add(egui::Slider::new(value, range).text(label));
+        self.found(ui, r.rect, label);
+        self.watch(r, false);
     }
     fn finish(&mut self, ctx: &egui::Context) {
         if !self.enabled {
@@ -1193,7 +1454,7 @@ fn bar_buttons_editor(
     s: &mut crate::model::Settings,
     tab: &mut &'static str,
 ) {
-    ui.heading("Bar buttons");
+    Viewer::settings_section(ui, "Buttons on the bars");
     ui.horizontal_wrapped(|ui| {
         for (bar, label) in [
             ("toolbar", "Toolbar"),
@@ -1711,6 +1972,9 @@ pub struct Viewer {
     /// Settings show the Move grid's grid settings (swapped in while the
     /// Move grid is not open).
     settings_move_target: bool,
+    /// Settings' search words, and the search and page last scrolled to.
+    settings_query: String,
+    settings_scrolled: Option<(String, usize)>,
     /// A profile to switch to (Settings or the right-click menu).
     pending_profile: Option<String>,
     /// Naming a profile: the one renamed (none: a new one) and the text.
@@ -1980,6 +2244,8 @@ impl Viewer {
             settings_snapshot: None,
             popup_rect: None,
             settings_move_target: false,
+            settings_query: String::new(),
+            settings_scrolled: None,
             pending_profile: None,
             profile_edit: None,
             favorite_anchor: None,
@@ -3565,6 +3831,7 @@ impl Viewer {
                 let r = plain_text_link(ui, "Manage in Settings…".into(), false, true);
                 if self.hover.watch(r, false).clicked() {
                     self.settings = true;
+                    self.settings_tab = SETTINGS_PROFILES;
                     done = true;
                 }
             }),
@@ -3636,7 +3903,7 @@ impl Viewer {
                     .button(ui, "Manage in Settings…", false, true, false)
                 {
                     self.settings = true;
-                    self.settings_tab = 2;
+                    self.settings_tab = SETTINGS_FOLDERS;
                     self.settings_scroll = Some("favorites");
                     done = true;
                 }
@@ -8919,10 +9186,126 @@ impl Viewer {
         invalidate: &mut bool,
         actions: &mut Vec<&'static str>,
     ) {
-        ui.heading("Settings");
-        // Which grid the grid settings here belong to.
+        // Pages in a column at the left, the page beside it, Done / Cancel
+        // and the profile in use below.
+        // Room for the separator and the buttons: content taller than the
+        // window would make the window grow every frame.
+        let footer = 64.;
+        let height = (ui.available_height() - footer).max(160.);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(170., height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(170.);
+                    ui.heading("Settings");
+                    ui.add_space(4.);
+                    let search = ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_query)
+                            .hint_text("Search settings")
+                            .desired_width(160.),
+                    );
+                    self.hover.watch(search, false);
+                    ui.add_space(6.);
+                    // Searching: how many controls of each page match.
+                    let counts = self.settings_search_counts(ui);
+                    for (i, name) in SETTINGS_PAGES.iter().enumerate() {
+                        let chosen = self.settings_tab == i;
+                        let label = match counts.get(i) {
+                            Some(&n) if n > 0 => format!("{name}  ({n})"),
+                            _ => (*name).to_owned(),
+                        };
+                        let text = RichText::new(label).size(14.);
+                        let text = if chosen {
+                            text.color(GREEN).strong()
+                        } else if counts.get(i) == Some(&0) {
+                            text.color(MUTED.gamma_multiply(0.6))
+                        } else {
+                            text
+                        };
+                        let r = ui.add_sized(
+                            [160., 26.],
+                            egui::Button::new(text).selected(chosen).frame(chosen),
+                        );
+                        if self.hover.watch(r, false).clicked() {
+                            self.settings_tab = i;
+                        }
+                    }
+                },
+            );
+            // A line between the pages and the page, as tall as they are (a
+            // separator here would take all the height there is and grow
+            // the window every frame).
+            let (line, _) = ui.allocate_exact_size(Vec2::new(9., height), Sense::hover());
+            ui.painter().vline(
+                line.center().x,
+                line.y_range(),
+                ui.visuals().widgets.noninteractive.bg_stroke,
+            );
+            ui.vertical(|ui| {
+                // Fills the window's height (the window can be made taller);
+                // the room for the buttons below is kept, or the window
+                // would grow every frame.
+                egui::ScrollArea::vertical()
+                    .id_salt(("settings_page", self.settings_tab))
+                    .auto_shrink([false, false])
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        self.hover.search = self.settings_query.trim().to_lowercase();
+                        self.hover.first_found = None;
+                        self.settings_controls(ui, self.settings_tab, invalidate, actions);
+                        // A new search or page: the first match in view.
+                        let key = (self.hover.search.clone(), self.settings_tab);
+                        if let Some(rect) = self.hover.first_found.take() {
+                            if self.settings_scrolled.as_ref() != Some(&key) {
+                                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                                self.settings_scrolled = Some(key);
+                            }
+                        }
+                        self.hover.search.clear();
+                        self.hover.found.clear();
+                    });
+            });
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if self.hover.button(ui, "Done", false, true, false) {
+                actions.push("done");
+            }
+            let cancel = ui
+                .add(egui::Button::new("Cancel"))
+                .on_hover_text("Undo the changes made since Settings was opened");
+            if self.hover.watch(cancel, false).clicked() {
+                actions.push("cancel");
+            }
+            ui.label(RichText::new("Saved automatically.").color(MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The profile in use; a click shows Profiles & backup.
+                let active = self.lib.settings.active_profile.clone();
+                let differences = self.lib.settings.profile_differences();
+                let text = match (active.is_empty(), differences) {
+                    (true, _) => "Profile: none".to_owned(),
+                    (false, 0) => format!("Profile: {active}"),
+                    (false, n) => format!("Profile: {active} — {n} changed"),
+                };
+                let r = plain_text_link(ui, text, false, true).on_hover_text("Profiles");
+                if self.hover.watch(r, false).clicked() {
+                    self.settings_tab = SETTINGS_PROFILES;
+                }
+            });
+        });
+    }
+    /// A section's title within a Settings page.
+    fn settings_section(ui: &mut egui::Ui, title: &str) {
+        ui.add_space(14.);
+        ui.label(RichText::new(title).strong().size(15.).color(GREEN));
+        ui.add_space(2.);
+    }
+    /// The Grid page: whose grid settings it shows, the grid's or the Move
+    /// grid's (marked images).
+    fn grid_target_switch(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label("Grid settings of");
+            ui.label("Settings of");
             let open = self.move_grid.is_some();
             let moving = open || self.settings_move_target;
             if self.hover.button(ui, "Grid", !moving, !open, false) {
@@ -8937,65 +9320,81 @@ impl Viewer {
         });
         if self.move_grid.is_some() || self.settings_move_target {
             ui.label(
-                RichText::new("The grid's settings here (hover preview, circles, page order, selections, bar…) are the Move grid's own; the grid keeps its own.")
+                RichText::new("These are the Move grid's own grid settings; the grid keeps its own. The Move grid's other settings are under Move & delete.")
                     .color(MOVE_BLUE),
             );
         }
+    }
+    /// Profiles & backup: the profile in use and its buttons.
+    fn profile_page(&mut self, ui: &mut egui::Ui) {
         self.profile_row(ui);
-        ui.horizontal_wrapped(|ui| {
-            for (i, name) in [
-                "Display",
-                "Interaction",
-                "Library",
-                "Music",
-                "Upscaling",
-                "Backup",
-                "Shortcuts",
-            ]
-            .iter()
-            .enumerate()
-            {
-                if self
-                    .hover
-                    .button(ui, *name, self.settings_tab == i, true, false)
-                {
-                    self.settings_tab = i;
-                }
-            }
-        });
-        ui.separator();
-        // Fills the window's height (the window can be made taller).
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            // Leaves room for the buttons below: content taller than the
-            // window would make the window grow every frame.
-            .max_height((ui.available_height() - 64.).max(120.))
-            .show(ui, |ui| self.settings_controls(ui, invalidate, actions));
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Settings are saved automatically.").color(MUTED));
-            if self.hover.button(ui, "Done", false, true, false) {
-                actions.push("done");
-            }
-            let cancel = ui
-                .add(egui::Button::new("Cancel"))
-                .on_hover_text("Undo the changes made since Settings was opened");
-            if self.hover.watch(cancel, false).clicked() {
-                actions.push("cancel");
-            }
-        });
+        ui.label(RichText::new("A profile keeps the display and interaction settings under a name. Folders, watching, caches, backups, the graphics backend and diagnostics stay as they are. The bars' Profile button and the right-click menu switch profiles too.").color(MUTED));
+    }
+    /// Settings' search: each page drawn unseen (nothing can be clicked)
+    /// to count the controls whose label has the words. Empty: not
+    /// searching.
+    fn settings_search_counts(&mut self, ui: &mut egui::Ui) -> Vec<usize> {
+        let query = self.settings_query.trim().to_lowercase();
+        if query.is_empty() {
+            return vec![];
+        }
+        let scroll = self.settings_scroll;
+        let mut counts = vec![];
+        for page in 0..SETTINGS_PAGES.len() {
+            self.hover.search = query.clone();
+            self.hover.found.clear();
+            let area = Rect::from_min_size(Pos2::new(-20000., -20000.), Vec2::new(600., 20000.));
+            let mut unseen = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("settings_search", page))
+                    .max_rect(area)
+                    .invisible(),
+            );
+            // Only counting: anything the unseen pages would ask for is
+            // dropped.
+            self.settings_controls(&mut unseen, page, &mut false, &mut vec![]);
+            counts.push(self.hover.found.len());
+            self.hover.first_found = None;
+        }
+        self.hover.search.clear();
+        self.hover.found.clear();
+        self.settings_scroll = scroll;
+        counts
     }
     fn settings_controls(
         &mut self,
         ui: &mut egui::Ui,
+        page: usize,
         invalidate: &mut bool,
         actions: &mut Vec<&'static str>,
     ) {
+        let page = page.min(SETTINGS_PAGES.len() - 1);
+        ui.horizontal(|ui| {
+            ui.heading(SETTINGS_PAGES[page]);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.hover.button(
+                    ui,
+                    "Reset this page…",
+                    false,
+                    !SETTINGS_RESET[page].is_empty(),
+                    false,
+                ) {
+                    self.dialog = Some(Dialog::ResetSettingsPage(page));
+                }
+            });
+        });
+        // Calls needing all of `self` come before the settings are borrowed.
+        match page {
+            2 => self.grid_target_switch(ui),
+            SETTINGS_PROFILES => self.profile_page(ui),
+            _ => {}
+        }
         let s = &mut self.lib.settings;
         let h = &mut self.hover;
-        match self.settings_tab {
+        let settings_section = Viewer::settings_section;
+        match page {
             0 => {
-                ui.heading("Image & floating toolbar");
+                settings_section(ui, "Image");
                 ui.label("Image sizing");
                 ui.horizontal_wrapped(|ui| {
                     for mode in [DisplayMode::Fit, DisplayMode::Fill, DisplayMode::ShrinkOnly] {
@@ -9005,11 +9404,6 @@ impl Viewer {
                     }
                 });
                 ui.label("Fit shows the whole image. Fill covers the window and crops the edges, keeping the aspect ratio. Shrink only does not enlarge small images.");
-                h.check(
-                    ui,
-                    &mut s.recursive,
-                    "Include subfolders when opening a folder",
-                );
                 h.check(
                     ui,
                     &mut s.animate_gif,
@@ -9024,6 +9418,7 @@ impl Viewer {
                     );
                 });
                 ui.label(RichText::new("Frames are kept decoded in video memory while the GIF is shown. A larger animation shows its first frame; grid thumbnails always show the first frame.").color(MUTED));
+                settings_section(ui, "Magnifier");
                 h.check(
                     ui,
                     &mut s.magnifier,
@@ -9036,6 +9431,7 @@ impl Viewer {
                 h.slider(ui, &mut s.lens_feather_px, 1.0..=60.0, "Edge softness (px)");
                 h.check(ui, &mut s.lens_full_window, "Full-window zoom");
                 ui.label("Hold and move the left mouse button to magnify. Full-window zoom follows the pointer across the image viewing area; release to restore the view.");
+                settings_section(ui, "While an image loads");
                 h.check(
                     ui,
                     &mut s.jpeg_preview,
@@ -9052,330 +9448,63 @@ impl Viewer {
                     &mut s.fullscreen_image_only,
                     "Fullscreen shows only the image (no top bar, image number or notices)",
                 );
+                settings_section(ui, "Title");
                 h.check(
                     ui,
-                    &mut s.low_latency_display,
-                    "Low-latency display: the graphics driver queues one frame instead of two (after a restart)",
+                    &mut s.image_title_folder,
+                    "Image view title: the folder before the image name",
                 );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Graphics backend (after a restart)");
-                    for (value, label) in [
-                        ("", "Automatic"),
-                        ("dx12", "DirectX 12"),
-                        ("vulkan", "Vulkan"),
-                        ("opengl", "OpenGL"),
-                    ] {
-                        if h.button(ui, label, s.graphics_backend == value, true, false) {
-                            s.graphics_backend = value.to_owned();
-                        }
-                    }
-                });
-                ui.label(RichText::new(format!("In use: {}. Automatic is OpenGL on Windows (Vulkan / DirectX 12 if OpenGL does not start). If a backend does not start, the next start uses the automatic choice.", self.gpu)).color(MUTED));
-                ui.label(RichText::new("Vulkan with NVIDIA: if a strip stays at the window's bottom and right after resizing and clicks land above, set NVIDIA Control Panel → Manage 3D settings → Vulkan/OpenGL present method → Prefer native, or use OpenGL.").color(MUTED));
                 h.check(
                     ui,
-                    &mut s.remember_window,
-                    "Remember the window's size and position (after a restart)",
-                );
-                ui.label(RichText::new("Off: NoirView opens at its default size each time. Try this if part of the window stays transparent or clicks land above where you click.").color(MUTED));
-                ui.separator();
-                bar_buttons_editor(ui, h, s, &mut self.bar_buttons_tab);
-                ui.separator();
-                h.slider(ui, &mut s.bar_width, 340.0..=1600.0, "Toolbar width (px)");
-                s.initialize_tag_width();
-                h.slider(
-                    ui,
-                    s.tags_max_width.as_mut().unwrap(),
-                    340.0..=1600.0,
-                    "Tags maximum width (px)",
+                    &mut s.path_forward_slashes,
+                    "Show folder paths with forward slashes (D:/Photos)",
                 );
                 h.slider(
                     ui,
-                    &mut s.bar_height,
-                    40.0..=160.0,
-                    "Toolbar minimum height (px)",
+                    &mut s.title_raise,
+                    -6.0..=6.0,
+                    "Raise the title beside NOIRVIEW (px, 0 = same baseline)",
                 );
-                h.slider(
-                    ui,
-                    &mut s.bar_bottom,
-                    0.0..=1500.0,
-                    "Distance from bottom, image view (px)",
-                );
-                let mut grid = s.bar_bottom_grid();
-                h.slider(
-                    ui,
-                    &mut grid,
-                    0.0..=1500.0,
-                    "Distance from bottom, grid (px)",
-                );
-                s.bar_bottom_grid = Some(grid);
-                h.check(
-                    ui,
-                    &mut s.bar_locked,
-                    if s.bar_lock_universal {
-                        "Lock the toolbar open (everywhere)"
-                    } else {
-                        "Lock the toolbar open in the image view"
-                    },
-                );
-                ui.add_enabled_ui(!s.bar_lock_universal, |ui| {
-                    h.check(
-                        ui,
-                        &mut s.bar_locked_grid,
-                        "Lock the toolbar open in the grid",
-                    );
-                });
-                h.check(
-                    ui,
-                    &mut s.bar_lock_universal,
-                    "Universal lock: one lock for the image view and the grid",
-                );
-                ui.label(RichText::new("A locked toolbar stays open: the bottom edge and Escape do not close it. The lock icon at its right end switches the lock of the current view. The image view and the grid keep their own distance from the bottom; the toolbar always stays on screen.").color(MUTED));
-                h.slider(
-                    ui,
-                    &mut s.bar_offset,
-                    -600.0..=600.0,
-                    "Horizontal offset (px)",
-                );
-                color_controls(ui, h, &mut s.bar_color, "Toolbar color");
-                h.check(
-                    ui,
-                    &mut s.show_favorites_button,
-                    "Show Favorites button in toolbar",
-                );
-                h.slider(
-                    ui,
-                    &mut s.bar_edge_px,
-                    2.0..=100.0,
-                    "Bottom activation strip (px)",
-                );
-                h.slider(
-                    ui,
-                    &mut s.bar_delay_ms,
-                    0..=3000,
-                    "Toolbar activation delay (ms)",
-                );
-                ui.separator();
-                ui.heading("Floating trash button");
-                h.slider(ui, &mut s.delete_size, 48.0..=260.0, "Diameter (px)");
-                color_controls(ui, h, &mut s.delete_color, "Button color");
-                h.slider(
-                    ui,
-                    &mut s.delete_opacity,
-                    0.02..=1.0,
-                    "Overall opacity (including border & close)",
-                );
-                h.check(ui, &mut s.delete_border, "Show border");
-                h.slider(
-                    ui,
-                    &mut s.delete_border_width,
-                    0.5..=12.0,
-                    "Border width (px)",
-                );
-                color_controls(ui, h, &mut s.delete_border_color, "Border color");
-                h.slider(
-                    ui,
-                    &mut s.close_angle,
-                    0.0..=360.0,
-                    "Close button angle (degrees)",
-                );
-                h.slider(
-                    ui,
-                    &mut s.close_size,
-                    16.0..=64.0,
-                    "Close button diameter (px)",
-                );
-                if h.button(ui, "Reset trash button position", false, true, false) {
-                    s.delete_pos = None;
-                    self.delete_area_revision += 1;
-                }
             }
             1 => {
-                ui.heading("Hover & activation edges");
-                h.check(
-                    ui,
-                    &mut s.hover,
-                    "Activate controls by hovering (toolbar, grid, menus, dialogs)",
-                );
-                let mut trash = s.hover_trash();
-                h.check(
-                    ui,
-                    &mut trash,
-                    "Activate the floating trash button by hovering",
-                );
-                s.hover_trash = Some(trash);
-                let mut moving = s.hover_move();
-                h.check(
-                    ui,
-                    &mut moving,
-                    "Activate the floating Move button by hovering",
-                );
-                s.hover_move = Some(moving);
-                let mut settings = s.hover_settings();
-                h.check(
-                    ui,
-                    &mut settings,
-                    "Activate Settings window controls by hovering",
-                );
-                s.hover_settings = Some(settings);
-                h.slider(ui, &mut s.hover_ms, 0..=4000, "Control dwell delay (ms)");
-                h.slider(
-                    ui,
-                    &mut s.destructive_ms,
-                    0..=6000,
-                    "Destructive action dwell delay (ms)",
-                );
-                h.check(
-                    ui,
-                    &mut s.hover_ring,
-                    "Show the progress ring while hovering a control",
-                );
-                ui.label(RichText::new("The progress ring shows when a control will activate. Leave a control or edge to re-arm it.").color(MUTED));
-                ui.separator();
-                h.check(
-                    ui,
-                    &mut s.edges,
-                    "Browse by hovering at the left / right edge",
-                );
-                h.slider(
-                    ui,
-                    &mut s.side_px,
-                    2.0..=800.0,
-                    "Side activation strip (px)",
-                );
-                h.slider(ui, &mut s.side_ms, 0..=4000, "Side activation delay (ms)");
-                h.check(
-                    ui,
-                    &mut s.top_delete,
-                    "Move image to Recycle Bin at the top edge",
-                );
-                h.slider(ui, &mut s.top_px, 2.0..=600.0, "Top activation strip (px)");
-                h.slider(ui, &mut s.top_ms, 0..=6000, "Top activation delay (ms)");
-                ui.label(RichText::new("Strips cover at most 45 % of the window. With a 0 ms top delay and no confirmation, touching the top edge moves the image to the Recycle Bin at once.").color(MUTED));
-                h.check(
-                    ui,
-                    &mut s.confirm_delete,
-                    "Confirm before moving images to Recycle Bin",
-                );
-                h.check(
-                    ui,
-                    &mut s.confirm_restore,
-                    "Confirm before restoring deleted images",
-                );
-                h.check(
-                    ui,
-                    &mut s.forget_deletion_on_close,
-                    "Forget the last deletion when NoirView closes",
-                );
-                ui.label(RichText::new("Restore deleted (toolbar, grid bar, right-click menu, Ctrl+Z) moves the last deleted images back from the Recycle Bin and shows the first one. Off: it also works after a restart.").color(MUTED));
-                ui.separator();
-                ui.heading("Floating Move button");
-                ui.label(RichText::new("Single image view. Its toolbar button: a click shows the floating Move button (moves the image shown); holding starts marking images to move, and while marking a click opens the Move grid of the marked images (holding stops marking). The Move grid works like the grid (hover preview, tags, selections, Trash, page size) with Move, Destination (hold: favorites), Keep names and Cancel on its icon bar; a click on a thumbnail shows it big.").color(MUTED));
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Move grid pages");
-                    if h.button(ui, "Pages", !s.move_grid_all, true, false) {
-                        s.move_grid_all = false;
-                    }
-                    if h.button(
-                        ui,
-                        "All on one page (scrolls on)",
-                        s.move_grid_all,
-                        true,
-                        false,
-                    ) {
-                        s.move_grid_all = true;
-                    }
-                });
-                h.slider(
-                    ui,
-                    &mut s.move_grid_count,
-                    1..=crate::grid_layout::MAX_COUNT,
-                    "Images per page",
-                );
-                h.check(
-                    ui,
-                    &mut s.move_grid_round_full,
-                    "Round page size up to fill the grid",
-                );
-                ui.add_enabled_ui(s.move_grid_all, |ui| {
-                    h.check(
-                        ui,
-                        &mut s.move_grid_row,
-                        "One row at a time (instead of a page)",
-                    );
-                });
-                ui.label(RichText::new("All on one page: the page goes on downwards; the wheel and the page arrows bring the next page (or row) up instead of turning the page.").color(MUTED));
-                h.check(
-                    ui,
-                    &mut s.move_grid_browse,
-                    "The big image from the Move grid browses the marked images",
-                );
-                h.check(
-                    ui,
-                    &mut s.move_grid_marks,
-                    "Show the \"✔ MOVE\" mark on the Move grid's thumbnails",
-                );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("× on the thumbnails: colour");
-                    let c = s.move_x_color;
-                    let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-                    if ui.color_edit_button_srgba(&mut color).changed() {
-                        s.move_x_color = color.to_srgba_unmultiplied();
-                    }
-                });
-                corner_controls(ui, h, "× place", &mut s.move_x_corner, &mut s.move_x_offset);
-                corner_controls(
-                    ui,
-                    h,
-                    "\"✔ MOVE\" mark place",
-                    &mut s.move_mark_corner,
-                    &mut s.move_mark_offset,
-                );
-                h.check(
-                    ui,
-                    &mut s.move_grid_frame,
-                    "A frame round the window while the Move grid is open",
-                );
-                ui.add_enabled_ui(s.move_grid_frame, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Frame colour");
-                        let c = s.move_grid_frame_color;
-                        let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-                        if ui.color_edit_button_srgba(&mut color).changed() {
-                            s.move_grid_frame_color = color.to_srgba_unmultiplied();
-                        }
-                    });
-                    h.slider(
-                        ui,
-                        &mut s.move_grid_frame_width,
-                        1.0..=24.0,
-                        "Frame width (px)",
-                    );
-                    h.slider(
-                        ui,
-                        &mut s.move_grid_frame_opacity,
-                        0.05..=1.0,
-                        "Frame opacity",
-                    );
-                });
-                h.slider(ui, &mut s.move_x_size, 12.0..=48.0, "× size (px)");
-                h.slider(ui, &mut s.move_x_opacity, 0.1..=1.0, "× opacity");
-                h.check(
-                    ui,
-                    &mut s.grid_move_marks,
-                    "Show the marks on the grid's thumbnails too",
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Button colour");
-                    let c = s.move_color;
-                    let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-                    if ui.color_edit_button_srgba(&mut color).changed() {
-                        s.move_color = color.to_srgba_unmultiplied();
-                    }
-                });
-                ui.separator();
-                ui.heading("Browsing");
+                settings_section(ui, "Order");
                 order_controls(ui, h, &mut s.order, "browse_order");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Sort images by");
+                    for k in crate::sorting::SortKey::ALL {
+                        if h.button(ui, k.label(), s.sort_key == k, true, false) {
+                            s.sort_key = k;
+                        }
+                    }
+                    if h.button(ui, "Descending", s.sort_descending, true, false) {
+                        s.sort_descending = !s.sort_descending;
+                    }
+                });
+                settings_section(ui, "Mouse wheel");
+                h.check(ui, &mut s.wheel_up_next, "Scroll up for next image");
+                h.check(
+                    ui,
+                    &mut s.random_wheel_both,
+                    "Random / Shuffle order: scrolling either way shows a new image (no history)",
+                );
+                ui.label(
+                    "On: scroll up for Next, down for Previous. Off reverses the wheel direction.",
+                );
+                settings_section(ui, "History");
+                h.slider(
+                    ui,
+                    &mut s.history_limit,
+                    2..=100_000,
+                    "History length (visits)",
+                );
+                ui.label(format!("Recent trail: {} / {} visits. Includes the current image and repeated visits. Distant visits are forgotten at the limit.",self.nav.history_len(),self.nav.history_limit()));
+                ui.label("Changing the browsing order starts a new trail at the current image. Within one order, Previous follows the recorded trail.");
+                h.check(
+                    ui,
+                    &mut s.keep_selected_tags,
+                    "Keep selected tags when the image changes (with tag lock)",
+                );
+                settings_section(ui, "Round notice");
                 h.check(
                     ui,
                     &mut s.round_notice,
@@ -9441,44 +9570,28 @@ impl Viewer {
                     });
                 });
                 ui.label(RichText::new("In the image view: once every image of the list has been shown, a new round begins. The toolbar's round button (in the group by default) turns this on and off.").color(MUTED));
-                h.check(ui, &mut s.wheel_up_next, "Scroll up for next image");
+                settings_section(ui, "Window edges");
                 h.check(
                     ui,
-                    &mut s.random_wheel_both,
-                    "Random / Shuffle order: scrolling either way shows a new image (no history)",
-                );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Sort images by");
-                    for k in crate::sorting::SortKey::ALL {
-                        if h.button(ui, k.label(), s.sort_key == k, true, false) {
-                            s.sort_key = k;
-                        }
-                    }
-                    if h.button(ui, "Descending", s.sort_descending, true, false) {
-                        s.sort_descending = !s.sort_descending;
-                    }
-                });
-                ui.label(
-                    "On: scroll up for Next, down for Previous. Off reverses the wheel direction.",
+                    &mut s.edges,
+                    "Browse by hovering at the left / right edge",
                 );
                 h.slider(
                     ui,
-                    &mut s.history_limit,
-                    2..=100_000,
-                    "History length (visits)",
+                    &mut s.side_px,
+                    2.0..=800.0,
+                    "Side activation strip (px)",
                 );
-                ui.label(format!("Recent trail: {} / {} visits. Includes the current image and repeated visits. Distant visits are forgotten at the limit.",self.nav.history_len(),self.nav.history_limit()));
-                ui.label("Changing the browsing order starts a new trail at the current image. Within one order, Previous follows the recorded trail.");
-                h.slider(ui, &mut s.prefetch_ahead, 0..=32, "Prefetch ahead");
-                h.slider(ui, &mut s.prefetch_behind, 0..=32, "Prefetch behind");
-                ui.label("Maximum images in and against the browsing direction. Memory limits may reduce these counts. Zero disables that side.");
+                h.slider(ui, &mut s.side_ms, 0..=4000, "Side activation delay (ms)");
                 h.check(
                     ui,
-                    &mut s.keep_selected_tags,
-                    "Keep selected tags when the image changes (with tag lock)",
+                    &mut s.top_delete,
+                    "Move image to Recycle Bin at the top edge",
                 );
-                ui.separator();
-                ui.heading("Slideshow");
+                h.slider(ui, &mut s.top_px, 2.0..=600.0, "Top activation strip (px)");
+                h.slider(ui, &mut s.top_ms, 0..=6000, "Top activation delay (ms)");
+                ui.label(RichText::new("Strips cover at most 45 % of the window. With a 0 ms top delay and no confirmation, touching the top edge moves the image to the Recycle Bin at once.").color(MUTED));
+                settings_section(ui, "Slideshow");
                 h.slider(ui, &mut s.slideshow_secs, 0.5..=120.0, "Seconds per image");
                 order_controls(ui, h, &mut s.slideshow_order, "slide_order");
                 h.slider(
@@ -9508,162 +9621,7 @@ impl Viewer {
                 ui.label("During a slideshow the top edge pauses / resumes; it never deletes.");
             }
             2 => {
-                if self.settings_scroll.take() == Some("favorites") {
-                    ui.scroll_to_cursor(Some(egui::Align::TOP));
-                }
-                ui.heading("Favorite folders");
-                ui.label(RichText::new("Hold Open folder (toolbar or grid) to open one of these; the list can also add or remove the open folder.").color(MUTED));
-                h.check(
-                    ui,
-                    &mut s.remember_favorite_places,
-                    "Favorite folders open where browsing left them",
-                );
-                ui.label(RichText::new("Kept for each profile (and for no profile) and across restarts, with the browsing order: Shuffle goes on with the images not yet shown, new ones included. Go to image 1 starts over; deleted images are skipped.").color(MUTED));
-                let mut remove = None;
-                let mut swap = None;
-                let count = s.favorite_folders.len();
-                egui::Grid::new("favorite_folders")
-                    .num_columns(4)
-                    .spacing(Vec2::new(8., 4.))
-                    .show(ui, |ui| {
-                        for (i, f) in s.favorite_folders.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                if h.button(ui, "⏶", false, i > 0, false) {
-                                    swap = Some((i, i - 1));
-                                }
-                                if h.button(ui, "⏷", false, i + 1 < count, false) {
-                                    swap = Some((i, i + 1));
-                                }
-                            });
-                            let own = f
-                                .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            ui.add(
-                                egui::TextEdit::singleline(&mut f.name)
-                                    .desired_width(160.)
-                                    .hint_text(own),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(f.path.display().to_string()).color(MUTED),
-                                )
-                                .truncate(),
-                            );
-                            ui.horizontal(|ui| {
-                                if h.button(ui, "Change…", false, true, false) {
-                                    self.favorite_pick = Some(i);
-                                    actions.push("favorite");
-                                }
-                                if h.button(ui, "Remove", false, true, true) {
-                                    remove = Some(i);
-                                }
-                            });
-                            ui.end_row();
-                        }
-                    });
-                if let Some((a, b)) = swap {
-                    s.favorite_folders.swap(a, b);
-                }
-                if let Some(i) = remove {
-                    s.favorite_folders.remove(i);
-                }
-                ui.horizontal(|ui| {
-                    if h.button(ui, "Add a folder…", false, true, false) {
-                        self.favorite_pick = None;
-                        actions.push("favorite");
-                    }
-                    let open = self
-                        .folder
-                        .clone()
-                        .filter(|f| !s.favorite_folders.iter().any(|x| x.path == *f));
-                    if h.button(ui, "Add the open folder", false, open.is_some(), false) {
-                        if let Some(path) = open {
-                            s.favorite_folders.push(crate::model::FavoriteFolder {
-                                name: String::new(),
-                                path,
-                            });
-                        }
-                    }
-                });
-                ui.label(RichText::new("An empty name shows the folder's own name.").color(MUTED));
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("In the list as");
-                    for (value, label) in [
-                        ("buttons", "buttons"),
-                        ("text", "/name"),
-                        ("icon", "🗀 name"),
-                    ] {
-                        if h.button(ui, label, s.favorite_style == value, true, false) {
-                            s.favorite_style = value.to_owned();
-                        }
-                    }
-                });
-                ui.separator();
-                ui.heading("Files & tags");
-                ui.label("Keywords are cached in a local SQLite index. Only new or changed images are read again; the open folder is watched for changes.");
-                if let Some(store) = &self.store {
-                    if let Some(parent) = store.path.parent() {
-                        ui.label(format!(
-                            "Keyword index: {}",
-                            parent.join("keyword-index.sqlite3").display()
-                        ));
-                    }
-                }
-                if let Some(progress) = self.last_index {
-                    ui.label(format!(
-                        "Last index: {} checked · {} cached · {} read · {:.2}s",
-                        progress.total,
-                        progress.cached,
-                        progress.read,
-                        progress.elapsed.as_secs_f32()
-                    ));
-                }
-                if h.button(ui, "Rebuild keyword index…", false, !self.busy, false) {
-                    actions.push("reindex");
-                }
-
-                ui.label("Move destination");
-                ui.label(s.destination.display().to_string());
-                if h.button(
-                    ui,
-                    "Choose destination",
-                    false,
-                    !self.busy && !self.view_pending,
-                    false,
-                ) {
-                    actions.push("destination");
-                }
-                h.check(
-                    ui,
-                    &mut s.verified_move,
-                    "Verify moved files with SHA-256 and keep a recovery journal",
-                );
-                h.check(
-                    ui,
-                    &mut s.move_keep_names,
-                    "Keep the original file names when moving (default in the Move dialog)",
-                );
-                h.slider(ui, &mut s.move_digits, 1..=8, "Digits in sequence names");
-                h.check(
-                    ui,
-                    &mut s.move_fill_gaps,
-                    "Sequence names fill free numbers in the destination first",
-                );
-                let example = format!("{:0w$}", 1, w = s.move_digits.clamp(1, 8));
-                ui.label(RichText::new(format!("Without keeping the names they become {example}.ext and on (the format and extension stay intact), after the highest such number already in the destination; past the last number of that width it goes on with one digit more. Clashing original names get \" (2)\" and so on.")).color(MUTED));
-                ui.label("The move includes all images in the opened folder scope, even with an active filter.");
-                if h.button(
-                    ui,
-                    "Recover interrupted moves…",
-                    false,
-                    !self.busy && !self.view_pending && !s.destination.as_os_str().is_empty(),
-                    false,
-                ) {
-                    actions.push("recover");
-                }
-                ui.separator();
+                settings_section(ui, "Pages");
                 h.slider(
                     ui,
                     &mut s.thumbnail_count,
@@ -9696,6 +9654,36 @@ impl Viewer {
                     &mut s.filter_per_view,
                     "Separate filters for the grid and the image view (off: one filter for both)",
                 );
+                h.check(
+                    ui,
+                    &mut s.grid_wheel_pages,
+                    "Mouse wheel changes the grid page",
+                );
+                h.check(
+                    ui,
+                    &mut s.grid_page_wrap,
+                    "Grid pages wrap around: back from the first page to the last, on from the last to the first (In order pages)",
+                );
+                h.check(
+                    ui,
+                    &mut s.confirm_preset_remove,
+                    "Confirm before removing a page-size button",
+                );
+                settings_section(ui, "Opening");
+                ui.horizontal_wrapped(|ui| {
+                    use crate::model::GridStartMode as M;
+                    ui.label("Grid opens in");
+                    for (mode, label) in [
+                        (M::Selection, "Selection mode"),
+                        (M::Normal, "Normal mode"),
+                        (M::LastUsed, "Last used mode"),
+                    ] {
+                        if h.button(ui, label, s.grid_start_mode == mode, true, false) {
+                            s.grid_start_mode = mode;
+                        }
+                    }
+                });
+                settings_section(ui, "Controls");
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Grid controls");
                     if h.button(ui, "Text buttons", !s.grid_bar_icons, true, false) {
@@ -9775,106 +9763,44 @@ impl Viewer {
                         }
                     });
                 }
+                settings_section(ui, "Under the images and the title");
+                h.check(
+                    ui,
+                    &mut s.grid_keep_tag_mode,
+                    "Keep grid tag mode and palette open after saving keywords",
+                );
+                h.check(
+                    ui,
+                    &mut s.grid_show_marks,
+                    "Show keywords and Favorite / Elite under grid images",
+                );
+                ui.add_enabled_ui(s.grid_show_marks, |ui| {
+                    h.check(
+                        ui,
+                        &mut s.grid_marks_icons,
+                        "Favorite / Elite as icons only (♥ / ★)",
+                    );
+                });
                 ui.horizontal_wrapped(|ui| {
-                    use crate::model::GridStartMode as M;
-                    ui.label("Grid opens in");
-                    for (mode, label) in [
-                        (M::Selection, "Selection mode"),
-                        (M::Normal, "Normal mode"),
-                        (M::LastUsed, "Last used mode"),
-                    ] {
-                        if h.button(ui, label, s.grid_start_mode == mode, true, false) {
-                            s.grid_start_mode = mode;
-                        }
+                    ui.label("Grid page title");
+                    if h.button(ui, "first – last image", s.grid_caption_range, true, false) {
+                        s.grid_caption_range = true;
+                    }
+                    if h.button(ui, "first image – ...", !s.grid_caption_range, true, false) {
+                        s.grid_caption_range = false;
                     }
                 });
-                h.slider(
+                h.check(
                     ui,
-                    &mut s.grid_hold_ms,
-                    100..=1500,
-                    "Big image: hold longer than this for the magnifier (ms)",
-                );
-                ui.label(
-                    "In the big image opened from the grid, a shorter click returns to the grid.",
+                    &mut s.grid_caption_folder,
+                    "Grid page title: the folder before the image name",
                 );
                 h.check(
                     ui,
-                    &mut s.magnify_on_move,
-                    "Big image: moving while pressed starts the magnifier at once",
+                    &mut s.grid_caption_count,
+                    "Grid page title: the number of images at the end",
                 );
-                h.check(
-                    ui,
-                    &mut s.magnify_at_once,
-                    "Big image: magnify at once on press (a quick click still returns to the grid)",
-                );
-                h.check(
-                    ui,
-                    &mut s.gestures,
-                    "Gestures with the right mouse button (drag; a short click opens the menu)",
-                );
-                ui.label("The gesture closes the big image and the hover preview.");
-                h.check(
-                    ui,
-                    &mut s.gesture_opens_tile,
-                    "The same gesture over a grid image opens it big",
-                );
-                h.check(ui, &mut s.gesture_trail, "Show the gesture trail");
-                color_controls(ui, h, &mut s.gesture_trail_color, "Trail color");
-                h.slider(
-                    ui,
-                    &mut s.gesture_trail_width,
-                    1.0..=12.0,
-                    "Trail width (px)",
-                );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Gesture");
-                    for g in crate::gesture::Gesture::ALL {
-                        if h.button(ui, g.label(), s.gesture == g, s.gestures, false) {
-                            s.gesture = g;
-                        }
-                    }
-                });
-                h.slider(
-                    ui,
-                    &mut s.gesture_min_px,
-                    40.0..=600.0,
-                    "Gesture minimum distance (px)",
-                );
-                h.slider(
-                    ui,
-                    &mut s.gesture_max_ms,
-                    200..=3000,
-                    "Gesture maximum duration (ms)",
-                );
-                h.check(
-                    ui,
-                    &mut s.selection_flash,
-                    "Flash the button on Select all / Clear / Restore selection",
-                );
-                h.check(
-                    ui,
-                    &mut s.selection_toast,
-                    "Show a large message on Select all / Clear / Restore selection",
-                );
-                h.slider(
-                    ui,
-                    &mut s.selection_toast_size,
-                    14.0..=48.0,
-                    "Message text size",
-                );
-                h.slider(
-                    ui,
-                    &mut s.selection_toast_width,
-                    200.0..=1600.0,
-                    "Message box width (px)",
-                );
-                h.slider(
-                    ui,
-                    &mut s.selection_toast_height,
-                    60.0..=800.0,
-                    "Message box height (px)",
-                );
-                ui.separator();
+                settings_section(ui, "Hover preview");
                 h.check(
                     ui,
                     &mut s.grid_hover_preview,
@@ -9986,6 +9912,7 @@ impl Viewer {
                     });
                 });
                 ui.label("The preview also closes with the gesture and with Escape.");
+                settings_section(ui, "Selection");
                 h.check(
                     ui,
                     &mut s.normal_keeps_selection,
@@ -9994,215 +9921,497 @@ impl Viewer {
                 ui.label(
                     "When off, Normal mode clears the selection; Restore selection brings it back.",
                 );
-                ui.separator();
                 h.check(
                     ui,
-                    &mut s.confirm_preset_remove,
-                    "Confirm before removing a page-size button",
-                );
-                h.check(
-                    ui,
-                    &mut s.diagnostic_log,
-                    "Write a diagnostic log (data/noirview.log)",
+                    &mut s.selection_flash,
+                    "Flash the button on Select all / Clear / Restore selection",
                 );
                 h.check(
                     ui,
-                    &mut s.window_diagnostics,
-                    "Window size diagnostics: draw the window's edges and the pointer as NoirView sees them",
+                    &mut s.selection_toast,
+                    "Show a large message on Select all / Clear / Restore selection",
                 );
-                ui.label(
-                    "Also writes window and surface sizes to data/noirview-window.log while on.",
-                );
-                h.check(
+                h.slider(
                     ui,
-                    &mut s.grid_keep_tag_mode,
-                    "Keep grid tag mode and palette open after saving keywords",
+                    &mut s.selection_toast_size,
+                    14.0..=48.0,
+                    "Message text size",
                 );
-                h.check(
+                h.slider(
                     ui,
-                    &mut s.grid_show_marks,
-                    "Show keywords and Favorite / Elite under grid images",
+                    &mut s.selection_toast_width,
+                    200.0..=1600.0,
+                    "Message box width (px)",
                 );
-                ui.add_enabled_ui(s.grid_show_marks, |ui| {
-                    h.check(
-                        ui,
-                        &mut s.grid_marks_icons,
-                        "Favorite / Elite as icons only (♥ / ★)",
-                    );
-                });
-                h.check(
+                h.slider(
                     ui,
-                    &mut s.grid_wheel_pages,
-                    "Mouse wheel changes the grid page",
+                    &mut s.selection_toast_height,
+                    60.0..=800.0,
+                    "Message box height (px)",
                 );
-                h.check(
-                    ui,
-                    &mut s.grid_page_wrap,
-                    "Grid pages wrap around: back from the first page to the last, on from the last to the first (In order pages)",
-                );
+                settings_section(ui, "Big image from the grid");
                 h.check(
                     ui,
                     &mut s.grid_viewer_browse,
                     "Browse images in the big image opened from the grid (the grid page follows)",
                 );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Grid page title");
-                    if h.button(ui, "first – last image", s.grid_caption_range, true, false) {
-                        s.grid_caption_range = true;
-                    }
-                    if h.button(ui, "first image – ...", !s.grid_caption_range, true, false) {
-                        s.grid_caption_range = false;
-                    }
-                });
-                h.check(
+                h.slider(
                     ui,
-                    &mut s.grid_caption_folder,
-                    "Grid page title: the folder before the image name",
+                    &mut s.grid_hold_ms,
+                    100..=1500,
+                    "Big image: hold longer than this for the magnifier (ms)",
+                );
+                ui.label(
+                    "In the big image opened from the grid, a shorter click returns to the grid.",
                 );
                 h.check(
                     ui,
-                    &mut s.grid_caption_count,
-                    "Grid page title: the number of images at the end",
+                    &mut s.magnify_on_move,
+                    "Big image: moving while pressed starts the magnifier at once",
                 );
                 h.check(
                     ui,
-                    &mut s.image_title_folder,
-                    "Image view title: the folder before the image name",
+                    &mut s.magnify_at_once,
+                    "Big image: magnify at once on press (a quick click still returns to the grid)",
                 );
-                h.check(
+            }
+            3 => {
+                settings_section(ui, "Toolbar");
+                h.slider(ui, &mut s.bar_width, 340.0..=1600.0, "Toolbar width (px)");
+                s.initialize_tag_width();
+                h.slider(
                     ui,
-                    &mut s.path_forward_slashes,
-                    "Show folder paths with forward slashes (D:/Photos)",
+                    s.tags_max_width.as_mut().unwrap(),
+                    340.0..=1600.0,
+                    "Tags maximum width (px)",
                 );
                 h.slider(
                     ui,
-                    &mut s.title_raise,
-                    -6.0..=6.0,
-                    "Raise the title beside NOIRVIEW (px, 0 = same baseline)",
+                    &mut s.bar_height,
+                    40.0..=160.0,
+                    "Toolbar minimum height (px)",
                 );
-                ui.label("Image loading");
+                h.slider(
+                    ui,
+                    &mut s.bar_bottom,
+                    0.0..=1500.0,
+                    "Distance from bottom, image view (px)",
+                );
+                let mut grid = s.bar_bottom_grid();
+                h.slider(
+                    ui,
+                    &mut grid,
+                    0.0..=1500.0,
+                    "Distance from bottom, grid (px)",
+                );
+                s.bar_bottom_grid = Some(grid);
+                h.check(
+                    ui,
+                    &mut s.bar_locked,
+                    if s.bar_lock_universal {
+                        "Lock the toolbar open (everywhere)"
+                    } else {
+                        "Lock the toolbar open in the image view"
+                    },
+                );
+                ui.add_enabled_ui(!s.bar_lock_universal, |ui| {
+                    h.check(
+                        ui,
+                        &mut s.bar_locked_grid,
+                        "Lock the toolbar open in the grid",
+                    );
+                });
+                h.check(
+                    ui,
+                    &mut s.bar_lock_universal,
+                    "Universal lock: one lock for the image view and the grid",
+                );
+                ui.label(RichText::new("A locked toolbar stays open: the bottom edge and Escape do not close it. The lock icon at its right end switches the lock of the current view. The image view and the grid keep their own distance from the bottom; the toolbar always stays on screen.").color(MUTED));
+                h.slider(
+                    ui,
+                    &mut s.bar_offset,
+                    -600.0..=600.0,
+                    "Horizontal offset (px)",
+                );
+                color_controls(ui, h, &mut s.bar_color, "Toolbar color");
+                h.check(
+                    ui,
+                    &mut s.show_favorites_button,
+                    "Show Favorites button in toolbar",
+                );
+                h.slider(
+                    ui,
+                    &mut s.bar_edge_px,
+                    2.0..=100.0,
+                    "Bottom activation strip (px)",
+                );
+                h.slider(
+                    ui,
+                    &mut s.bar_delay_ms,
+                    0..=3000,
+                    "Toolbar activation delay (ms)",
+                );
+                bar_buttons_editor(ui, h, s, &mut self.bar_buttons_tab);
+                settings_section(ui, "Hover activation");
+                h.check(
+                    ui,
+                    &mut s.hover,
+                    "Activate controls by hovering (toolbar, grid, menus, dialogs)",
+                );
+                let mut trash = s.hover_trash();
+                h.check(
+                    ui,
+                    &mut trash,
+                    "Activate the floating trash button by hovering",
+                );
+                s.hover_trash = Some(trash);
+                let mut moving = s.hover_move();
+                h.check(
+                    ui,
+                    &mut moving,
+                    "Activate the floating Move button by hovering",
+                );
+                s.hover_move = Some(moving);
+                let mut settings = s.hover_settings();
+                h.check(
+                    ui,
+                    &mut settings,
+                    "Activate Settings window controls by hovering",
+                );
+                s.hover_settings = Some(settings);
+                h.slider(ui, &mut s.hover_ms, 0..=4000, "Control dwell delay (ms)");
+                h.slider(
+                    ui,
+                    &mut s.destructive_ms,
+                    0..=6000,
+                    "Destructive action dwell delay (ms)",
+                );
+                h.check(
+                    ui,
+                    &mut s.hover_ring,
+                    "Show the progress ring while hovering a control",
+                );
+                ui.label(RichText::new("The progress ring shows when a control will activate. Leave a control or edge to re-arm it.").color(MUTED));
+                settings_section(ui, "Floating trash button");
+                h.slider(ui, &mut s.delete_size, 48.0..=260.0, "Diameter (px)");
+                color_controls(ui, h, &mut s.delete_color, "Button color");
+                h.slider(
+                    ui,
+                    &mut s.delete_opacity,
+                    0.02..=1.0,
+                    "Overall opacity (including border & close)",
+                );
+                h.check(ui, &mut s.delete_border, "Show border");
+                h.slider(
+                    ui,
+                    &mut s.delete_border_width,
+                    0.5..=12.0,
+                    "Border width (px)",
+                );
+                color_controls(ui, h, &mut s.delete_border_color, "Border color");
+                h.slider(
+                    ui,
+                    &mut s.close_angle,
+                    0.0..=360.0,
+                    "Close button angle (degrees)",
+                );
+                h.slider(
+                    ui,
+                    &mut s.close_size,
+                    16.0..=64.0,
+                    "Close button diameter (px)",
+                );
+                if h.button(ui, "Reset trash button position", false, true, false) {
+                    s.delete_pos = None;
+                    self.delete_area_revision += 1;
+                }
+                settings_section(ui, "Floating Move button");
+                ui.horizontal(|ui| {
+                    ui.label("Button colour");
+                    let c = s.move_color;
+                    let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    if ui.color_edit_button_srgba(&mut color).changed() {
+                        s.move_color = color.to_srgba_unmultiplied();
+                    }
+                });
+            }
+            4 => {
+                settings_section(ui, "Recycle Bin");
+                h.check(
+                    ui,
+                    &mut s.confirm_delete,
+                    "Confirm before moving images to Recycle Bin",
+                );
+                h.check(
+                    ui,
+                    &mut s.confirm_restore,
+                    "Confirm before restoring deleted images",
+                );
+                h.check(
+                    ui,
+                    &mut s.forget_deletion_on_close,
+                    "Forget the last deletion when NoirView closes",
+                );
+                ui.label(RichText::new("Restore deleted (toolbar, grid bar, right-click menu, Ctrl+Z) moves the last deleted images back from the Recycle Bin and shows the first one. Off: it also works after a restart.").color(MUTED));
+                settings_section(ui, "Moving");
+                ui.label("Move destination");
+                ui.label(s.destination.display().to_string());
+                if h.button(
+                    ui,
+                    "Choose destination",
+                    false,
+                    !self.busy && !self.view_pending,
+                    false,
+                ) {
+                    actions.push("destination");
+                }
+                h.check(
+                    ui,
+                    &mut s.verified_move,
+                    "Verify moved files with SHA-256 and keep a recovery journal",
+                );
+                h.check(
+                    ui,
+                    &mut s.move_keep_names,
+                    "Keep the original file names when moving (default in the Move dialog)",
+                );
+                h.slider(ui, &mut s.move_digits, 1..=8, "Digits in sequence names");
+                h.check(
+                    ui,
+                    &mut s.move_fill_gaps,
+                    "Sequence names fill free numbers in the destination first",
+                );
+                let example = format!("{:0w$}", 1, w = s.move_digits.clamp(1, 8));
+                ui.label(RichText::new(format!("Without keeping the names they become {example}.ext and on (the format and extension stay intact), after the highest such number already in the destination; past the last number of that width it goes on with one digit more. Clashing original names get \" (2)\" and so on.")).color(MUTED));
+                ui.label("The move includes all images in the opened folder scope, even with an active filter.");
+                if h.button(
+                    ui,
+                    "Recover interrupted moves…",
+                    false,
+                    !self.busy && !self.view_pending && !s.destination.as_os_str().is_empty(),
+                    false,
+                ) {
+                    actions.push("recover");
+                }
+                settings_section(ui, "Marking and the Move grid");
+                ui.label(RichText::new("Single image view. Its toolbar button: a click shows the floating Move button (moves the image shown); holding starts marking images to move, and while marking a click opens the Move grid of the marked images (holding stops marking). The Move grid works like the grid (hover preview, tags, selections, Trash, page size) with Move, Destination (hold: favorites), Keep names and Cancel on its icon bar; a click on a thumbnail shows it big.").color(MUTED));
                 ui.horizontal_wrapped(|ui| {
-                    for mode in [
-                        crate::model::LoadingMode::Standard,
-                        crate::model::LoadingMode::Aggressive,
-                    ] {
-                        if h.button(ui, mode.label(), s.loading_mode == mode, true, false) {
-                            s.loading_mode = mode;
+                    ui.label("Move grid pages");
+                    if h.button(ui, "Pages", !s.move_grid_all, true, false) {
+                        s.move_grid_all = false;
+                    }
+                    if h.button(
+                        ui,
+                        "All on one page (scrolls on)",
+                        s.move_grid_all,
+                        true,
+                        false,
+                    ) {
+                        s.move_grid_all = true;
+                    }
+                });
+                h.slider(
+                    ui,
+                    &mut s.move_grid_count,
+                    1..=crate::grid_layout::MAX_COUNT,
+                    "Images per page",
+                );
+                h.check(
+                    ui,
+                    &mut s.move_grid_round_full,
+                    "Round page size up to fill the grid",
+                );
+                ui.add_enabled_ui(s.move_grid_all, |ui| {
+                    h.check(
+                        ui,
+                        &mut s.move_grid_row,
+                        "One row at a time (instead of a page)",
+                    );
+                });
+                ui.label(RichText::new("All on one page: the page goes on downwards; the wheel and the page arrows bring the next page (or row) up instead of turning the page.").color(MUTED));
+                h.check(
+                    ui,
+                    &mut s.move_grid_browse,
+                    "The big image from the Move grid browses the marked images",
+                );
+                h.check(
+                    ui,
+                    &mut s.move_grid_marks,
+                    "Show the \"✔ MOVE\" mark on the Move grid's thumbnails",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("× on the thumbnails: colour");
+                    let c = s.move_x_color;
+                    let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    if ui.color_edit_button_srgba(&mut color).changed() {
+                        s.move_x_color = color.to_srgba_unmultiplied();
+                    }
+                });
+                corner_controls(ui, h, "× place", &mut s.move_x_corner, &mut s.move_x_offset);
+                corner_controls(
+                    ui,
+                    h,
+                    "\"✔ MOVE\" mark place",
+                    &mut s.move_mark_corner,
+                    &mut s.move_mark_offset,
+                );
+                h.check(
+                    ui,
+                    &mut s.move_grid_frame,
+                    "A frame round the window while the Move grid is open",
+                );
+                ui.add_enabled_ui(s.move_grid_frame, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Frame colour");
+                        let c = s.move_grid_frame_color;
+                        let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            s.move_grid_frame_color = color.to_srgba_unmultiplied();
+                        }
+                    });
+                    h.slider(
+                        ui,
+                        &mut s.move_grid_frame_width,
+                        1.0..=24.0,
+                        "Frame width (px)",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.move_grid_frame_opacity,
+                        0.05..=1.0,
+                        "Frame opacity",
+                    );
+                });
+                h.slider(ui, &mut s.move_x_size, 12.0..=48.0, "× size (px)");
+                h.slider(ui, &mut s.move_x_opacity, 0.1..=1.0, "× opacity");
+                h.check(
+                    ui,
+                    &mut s.grid_move_marks,
+                    "Show the marks on the grid's thumbnails too",
+                );
+            }
+            5 => {
+                settings_section(ui, "Folders");
+                h.check(
+                    ui,
+                    &mut s.recursive,
+                    "Include subfolders when opening a folder",
+                );
+                if self.settings_scroll.take() == Some("favorites") {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                }
+                settings_section(ui, "Favorite folders");
+                ui.label(RichText::new("Hold Open folder (toolbar or grid) to open one of these; the list can also add or remove the open folder.").color(MUTED));
+                h.check(
+                    ui,
+                    &mut s.remember_favorite_places,
+                    "Favorite folders open where browsing left them",
+                );
+                ui.label(RichText::new("Kept for each profile (and for no profile) and across restarts, with the browsing order: Shuffle goes on with the images not yet shown, new ones included. Go to image 1 starts over; deleted images are skipped.").color(MUTED));
+                let mut remove = None;
+                let mut swap = None;
+                let count = s.favorite_folders.len();
+                egui::Grid::new("favorite_folders")
+                    .num_columns(4)
+                    .spacing(Vec2::new(8., 4.))
+                    .show(ui, |ui| {
+                        for (i, f) in s.favorite_folders.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                if h.button(ui, "⏶", false, i > 0, false) {
+                                    swap = Some((i, i - 1));
+                                }
+                                if h.button(ui, "⏷", false, i + 1 < count, false) {
+                                    swap = Some((i, i + 1));
+                                }
+                            });
+                            let own = f
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut f.name)
+                                    .desired_width(160.)
+                                    .hint_text(own),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(f.path.display().to_string()).color(MUTED),
+                                )
+                                .truncate(),
+                            );
+                            ui.horizontal(|ui| {
+                                if h.button(ui, "Change…", false, true, false) {
+                                    self.favorite_pick = Some(i);
+                                    actions.push("favorite");
+                                }
+                                if h.button(ui, "Remove", false, true, true) {
+                                    remove = Some(i);
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+                if let Some((a, b)) = swap {
+                    s.favorite_folders.swap(a, b);
+                }
+                if let Some(i) = remove {
+                    s.favorite_folders.remove(i);
+                }
+                ui.horizontal(|ui| {
+                    if h.button(ui, "Add a folder…", false, true, false) {
+                        self.favorite_pick = None;
+                        actions.push("favorite");
+                    }
+                    let open = self
+                        .folder
+                        .clone()
+                        .filter(|f| !s.favorite_folders.iter().any(|x| x.path == *f));
+                    if h.button(ui, "Add the open folder", false, open.is_some(), false) {
+                        if let Some(path) = open {
+                            s.favorite_folders.push(crate::model::FavoriteFolder {
+                                name: String::new(),
+                                path,
+                            });
                         }
                     }
                 });
-                ui.label("Standard loads what is on screen and the neighbouring pages. Aggressive also caches thumbnails for the whole open folder in the background (one low-priority worker) and keeps a screen-sized first view of large images you have opened.");
-                let aggressive = s.loading_mode == crate::model::LoadingMode::Aggressive;
-                ui.add_enabled_ui(aggressive, |ui| {
-                    h.check(
-                        ui,
-                        &mut s.cache_while_active,
-                        "Keep caching thumbnails while I use NoirView",
-                    );
-                    h.check(
-                        ui,
-                        &mut s.cache_when_unfocused,
-                        "Keep caching thumbnails when the window is not active",
-                    );
-                    h.slider(
-                        ui,
-                        &mut s.proxy_cache_mb,
-                        0..=4096,
-                        "First-view disk cache for large images (MiB)",
-                    );
-                    h.slider(
-                        ui,
-                        &mut s.proxy_min_side,
-                        crate::thumbnail_cache::PROXY_SIDE..=8192,
-                        "Keep a first view for images at least this long (px, longer side)",
-                    );
-                });
-                ui.label("Without these options the background pass pauses 2 s after any input and while another program is in front. It always pauses during keyword indexing. The first view is a slightly compressed 2560 px copy shown until the exact image is ready; zero disables it. When one was shown, a note at the bottom left of the image reports its timing for a few seconds.");
-                let proxies = self.images.proxy_cache.stats();
-                if aggressive {
-                    ui.label(format!(
-                        "First views: {} hits / {} saved this session ({} not saved) · {} stored ({} MiB)",
-                        proxies.hits,
-                        proxies.writes,
-                        proxies.skipped + proxies.errors,
-                        proxies.entries,
-                        proxies.bytes / (1024 * 1024)
-                    ));
-                    if let Some(summary) = self.view_timer.as_ref().and_then(|t| t.summary()) {
-                        ui.label(format!("Last opened image: {summary}"));
+                ui.label(RichText::new("An empty name shows the folder's own name.").color(MUTED));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("In the list as");
+                    for (value, label) in [
+                        ("buttons", "buttons"),
+                        ("text", "/name"),
+                        ("icon", "🗀 name"),
+                    ] {
+                        if h.button(ui, label, s.favorite_style == value, true, false) {
+                            s.favorite_style = value.to_owned();
+                        }
                     }
-                    if !s.jpeg_preview {
-                        ui.label(RichText::new("First views are not shown: Settings → Display → \"Show a quick preview while the image loads\" is off.").color(RED));
+                });
+                settings_section(ui, "Keywords and tags");
+                ui.label("Keywords are cached in a local SQLite index. Only new or changed images are read again; the open folder is watched for changes.");
+                if let Some(store) = &self.store {
+                    if let Some(parent) = store.path.parent() {
+                        ui.label(format!(
+                            "Keyword index: {}",
+                            parent.join("keyword-index.sqlite3").display()
+                        ));
                     }
                 }
-                h.slider(
-                    ui,
-                    &mut s.thumbnail_cache_mb,
-                    0..=4096,
-                    "Thumbnail disk cache (MiB)",
-                );
-                ui.label("Speeds up reopening thumbnails. Zero disables disk caching; full image detail is preserved.");
-                if let Some(p) = self.images.pregen_progress() {
-                    ui.label(if p.full {
-                        format!(
-                            "Pre-generation stopped: cache nearly full ({} / {} images)",
-                            p.done, p.total
-                        )
-                    } else {
-                        format!(
-                            "Pre-generated: {} / {} images ({} new this pass)",
-                            p.done, p.total, p.generated
-                        )
-                    });
-                }
-                let cache = self.images.disk_cache.stats();
-                ui.label(format!(
-                    "Thumbnail cache: {} hits / {} saved this session · {} stored ({} MiB)",
-                    cache.hits,
-                    cache.writes,
-                    cache.entries,
-                    cache.bytes / (1024 * 1024)
-                ));
-                ui.label(if cache.pending == 0 {
-                    "Thumbnail cache: ready".to_owned()
-                } else {
-                    format!("Thumbnail cache: saving {} image(s)…", cache.pending)
-                });
-                if cache.skipped > 0 || cache.errors > 0 {
+                if let Some(progress) = self.last_index {
                     ui.label(format!(
-                        "Cache: {} older writes skipped under memory pressure / {} write errors this session",
-                        cache.skipped, cache.errors
+                        "Last index: {} checked · {} cached · {} read · {:.2}s",
+                        progress.total,
+                        progress.cached,
+                        progress.read,
+                        progress.elapsed.as_secs_f32()
                     ));
                 }
-                ui.label(if s.thumbnail_cache_dir.as_os_str().is_empty() {
-                    "Thumbnail cache folder: default (inside the NoirView data folder)".to_owned()
-                } else {
-                    format!(
-                        "Thumbnail cache folder: {}",
-                        s.thumbnail_cache_dir.join(CACHE_FOLDER).display()
-                    )
-                });
-                ui.horizontal(|ui| {
-                    if h.button(ui, "Choose cache folder", false, true, false) {
-                        actions.push("cache_dir");
-                    }
-                    if h.button(ui, "Use default folder", false, true, false) {
-                        s.thumbnail_cache_dir = PathBuf::new();
-                    }
-                });
-                if s.thumbnail_cache_dir != self.cache_dir_in_use {
-                    ui.label("The new cache folder is used after restarting NoirView.");
+                if h.button(ui, "Rebuild keyword index…", false, !self.busy, false) {
+                    actions.push("reindex");
                 }
-                ui.label("A folder outside the program folder keeps thumbnails when NoirView is replaced by a newer version.");
-                if h.button(
-                    ui,
-                    "Clear thumbnail cache (disk and memory)",
-                    false,
-                    true,
-                    false,
-                ) {
-                    actions.push("clear_thumbnails");
-                }
+
                 ui.label("Tags shows My tags by default. Additional includes image keywords with yellow borders. Use + to create your own tags.");
                 ui.label("Remove tags hides words from the palette; existing image keywords remain unchanged.");
                 ui.label(
@@ -10211,8 +10420,7 @@ impl Viewer {
                 if h.button(ui, "Rescan current folder…", false, !self.busy, false) {
                     actions.push("rescan");
                 }
-                ui.separator();
-                ui.heading("Watched folders");
+                settings_section(ui, "Watched folders");
                 h.check(
                     ui,
                     &mut s.watch_folders,
@@ -10389,8 +10597,172 @@ impl Viewer {
                 );
                 ui.label("With the service, the watcher reads what changed since the last check (at start and after large copies) instead of listing folders. Live watching is the same either way.");
             }
-            3 => {
-                ui.heading("Music");
+            6 => {
+                settings_section(ui, "Image loading");
+                ui.label("Image loading");
+                ui.horizontal_wrapped(|ui| {
+                    for mode in [
+                        crate::model::LoadingMode::Standard,
+                        crate::model::LoadingMode::Aggressive,
+                    ] {
+                        if h.button(ui, mode.label(), s.loading_mode == mode, true, false) {
+                            s.loading_mode = mode;
+                        }
+                    }
+                });
+                ui.label("Standard loads what is on screen and the neighbouring pages. Aggressive also caches thumbnails for the whole open folder in the background (one low-priority worker) and keeps a screen-sized first view of large images you have opened.");
+                let aggressive = s.loading_mode == crate::model::LoadingMode::Aggressive;
+                ui.add_enabled_ui(aggressive, |ui| {
+                    h.check(
+                        ui,
+                        &mut s.cache_while_active,
+                        "Keep caching thumbnails while I use NoirView",
+                    );
+                    h.check(
+                        ui,
+                        &mut s.cache_when_unfocused,
+                        "Keep caching thumbnails when the window is not active",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.proxy_cache_mb,
+                        0..=4096,
+                        "First-view disk cache for large images (MiB)",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.proxy_min_side,
+                        crate::thumbnail_cache::PROXY_SIDE..=8192,
+                        "Keep a first view for images at least this long (px, longer side)",
+                    );
+                });
+                ui.label("Without these options the background pass pauses 2 s after any input and while another program is in front. It always pauses during keyword indexing. The first view is a slightly compressed 2560 px copy shown until the exact image is ready; zero disables it. When one was shown, a note at the bottom left of the image reports its timing for a few seconds.");
+                let proxies = self.images.proxy_cache.stats();
+                if aggressive {
+                    ui.label(format!(
+                        "First views: {} hits / {} saved this session ({} not saved) · {} stored ({} MiB)",
+                        proxies.hits,
+                        proxies.writes,
+                        proxies.skipped + proxies.errors,
+                        proxies.entries,
+                        proxies.bytes / (1024 * 1024)
+                    ));
+                    if let Some(summary) = self.view_timer.as_ref().and_then(|t| t.summary()) {
+                        ui.label(format!("Last opened image: {summary}"));
+                    }
+                    if !s.jpeg_preview {
+                        ui.label(RichText::new("First views are not shown: Settings → Display → \"Show a quick preview while the image loads\" is off.").color(RED));
+                    }
+                }
+                h.slider(ui, &mut s.prefetch_ahead, 0..=32, "Prefetch ahead");
+                h.slider(ui, &mut s.prefetch_behind, 0..=32, "Prefetch behind");
+                ui.label("Maximum images in and against the browsing direction. Memory limits may reduce these counts. Zero disables that side.");
+                settings_section(ui, "Thumbnail cache");
+                h.slider(
+                    ui,
+                    &mut s.thumbnail_cache_mb,
+                    0..=4096,
+                    "Thumbnail disk cache (MiB)",
+                );
+                ui.label("Speeds up reopening thumbnails. Zero disables disk caching; full image detail is preserved.");
+                if let Some(p) = self.images.pregen_progress() {
+                    ui.label(if p.full {
+                        format!(
+                            "Pre-generation stopped: cache nearly full ({} / {} images)",
+                            p.done, p.total
+                        )
+                    } else {
+                        format!(
+                            "Pre-generated: {} / {} images ({} new this pass)",
+                            p.done, p.total, p.generated
+                        )
+                    });
+                }
+                let cache = self.images.disk_cache.stats();
+                ui.label(format!(
+                    "Thumbnail cache: {} hits / {} saved this session · {} stored ({} MiB)",
+                    cache.hits,
+                    cache.writes,
+                    cache.entries,
+                    cache.bytes / (1024 * 1024)
+                ));
+                ui.label(if cache.pending == 0 {
+                    "Thumbnail cache: ready".to_owned()
+                } else {
+                    format!("Thumbnail cache: saving {} image(s)…", cache.pending)
+                });
+                if cache.skipped > 0 || cache.errors > 0 {
+                    ui.label(format!(
+                        "Cache: {} older writes skipped under memory pressure / {} write errors this session",
+                        cache.skipped, cache.errors
+                    ));
+                }
+                ui.label(if s.thumbnail_cache_dir.as_os_str().is_empty() {
+                    "Thumbnail cache folder: default (inside the NoirView data folder)".to_owned()
+                } else {
+                    format!(
+                        "Thumbnail cache folder: {}",
+                        s.thumbnail_cache_dir.join(CACHE_FOLDER).display()
+                    )
+                });
+                ui.horizontal(|ui| {
+                    if h.button(ui, "Choose cache folder", false, true, false) {
+                        actions.push("cache_dir");
+                    }
+                    if h.button(ui, "Use default folder", false, true, false) {
+                        s.thumbnail_cache_dir = PathBuf::new();
+                    }
+                });
+                if s.thumbnail_cache_dir != self.cache_dir_in_use {
+                    ui.label("The new cache folder is used after restarting NoirView.");
+                }
+                ui.label("A folder outside the program folder keeps thumbnails when NoirView is replaced by a newer version.");
+                if h.button(
+                    ui,
+                    "Clear thumbnail cache (disk and memory)",
+                    false,
+                    true,
+                    false,
+                ) {
+                    actions.push("clear_thumbnails");
+                }
+                settings_section(ui, "Memory");
+                h.slider(
+                    ui,
+                    &mut s.cache_mb,
+                    64..=4096,
+                    "Texture / decoder memory budget (MiB)",
+                );
+                ui.label(format!("Cached textures: {} MiB", self.images.memory_mb()));
+                settings_section(ui, "Display");
+                h.check(
+                    ui,
+                    &mut s.low_latency_display,
+                    "Low-latency display: the graphics driver queues one frame instead of two (after a restart)",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Graphics backend (after a restart)");
+                    for (value, label) in [
+                        ("", "Automatic"),
+                        ("dx12", "DirectX 12"),
+                        ("vulkan", "Vulkan"),
+                        ("opengl", "OpenGL"),
+                    ] {
+                        if h.button(ui, label, s.graphics_backend == value, true, false) {
+                            s.graphics_backend = value.to_owned();
+                        }
+                    }
+                });
+                ui.label(RichText::new(format!("In use: {}. Automatic is OpenGL on Windows (Vulkan / DirectX 12 if OpenGL does not start). If a backend does not start, the next start uses the automatic choice.", self.gpu)).color(MUTED));
+                ui.label(RichText::new("Vulkan with NVIDIA: if a strip stays at the window's bottom and right after resizing and clicks land above, set NVIDIA Control Panel → Manage 3D settings → Vulkan/OpenGL present method → Prefer native, or use OpenGL.").color(MUTED));
+                h.check(
+                    ui,
+                    &mut s.remember_window,
+                    "Remember the window's size and position (after a restart)",
+                );
+                ui.label(RichText::new("Off: NoirView opens at its default size each time. Try this if part of the window stays transparent or clicks land above where you click.").color(MUTED));
+            }
+            7 => {
                 ui.label("MP3 · WAV · FLAC · Ogg Vorbis");
                 ui.horizontal(|ui| {
                     if h.button(ui, "Add tracks", false, true, false) {
@@ -10421,8 +10793,7 @@ impl Viewer {
                     ui.label(format!("Current: {track}"));
                 }
             }
-            4 => {
-                ui.heading("Rendering & upscaling");
+            8 => {
                 ui.label(&self.gpu);
                 ui.label(RichText::new("Images are rendered by wgpu. Decoding, prefetching and image processing run off the UI thread.").color(MUTED));
                 for mode in [
@@ -10449,14 +10820,6 @@ impl Viewer {
                     0.0..=1.0,
                     "Adaptive sharpening strength",
                 );
-                h.slider(
-                    ui,
-                    &mut s.cache_mb,
-                    64..=4096,
-                    "Texture / decoder memory budget (MiB)",
-                );
-                ui.label(format!("Cached textures: {} MiB", self.images.memory_mb()));
-                ui.separator();
                 ui.label("ONNX / ESRGAN model");
                 ui.label(s.model_path.display().to_string());
                 if h.button(ui, "Choose ONNX model", false, true, false) {
@@ -10478,8 +10841,9 @@ impl Viewer {
                     *invalidate = true;
                 }
             }
-            5 => {
-                ui.heading("Backups & restore");
+            9 => {
+                settings_section(ui, "Profiles");
+                settings_section(ui, "Backups & restore");
                 if let Some(store) = &self.store {
                     ui.label(format!(
                         "State: {}",
@@ -10551,8 +10915,8 @@ impl Viewer {
                 ui.label("Missed schedules run at the next launch. Restore makes a safety copy of the current state first.");
                 ui.label("Backups contain settings, tags, favorites and view state, not the image or music files.");
             }
-            _ => {
-                ui.heading("Keyboard shortcuts");
+            10 => {
+                settings_section(ui, "Keyboard shortcuts");
                 ui.label("Click a field and type an egui key name, for example ArrowRight, Space, F11, or T.");
                 for (action, key) in &mut s.shortcuts {
                     ui.horizontal(|ui| {
@@ -10571,6 +10935,62 @@ impl Viewer {
                 ui.separator();
                 ui.label(
                     "Escape closes the top dialog, settings or panel, then leaves fullscreen.",
+                );
+                settings_section(ui, "Mouse gestures");
+                h.check(
+                    ui,
+                    &mut s.gestures,
+                    "Gestures with the right mouse button (drag; a short click opens the menu)",
+                );
+                ui.label("The gesture closes the big image and the hover preview.");
+                h.check(
+                    ui,
+                    &mut s.gesture_opens_tile,
+                    "The same gesture over a grid image opens it big",
+                );
+                h.check(ui, &mut s.gesture_trail, "Show the gesture trail");
+                color_controls(ui, h, &mut s.gesture_trail_color, "Trail color");
+                h.slider(
+                    ui,
+                    &mut s.gesture_trail_width,
+                    1.0..=12.0,
+                    "Trail width (px)",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Gesture");
+                    for g in crate::gesture::Gesture::ALL {
+                        if h.button(ui, g.label(), s.gesture == g, s.gestures, false) {
+                            s.gesture = g;
+                        }
+                    }
+                });
+                h.slider(
+                    ui,
+                    &mut s.gesture_min_px,
+                    40.0..=600.0,
+                    "Gesture minimum distance (px)",
+                );
+                h.slider(
+                    ui,
+                    &mut s.gesture_max_ms,
+                    200..=3000,
+                    "Gesture maximum duration (ms)",
+                );
+            }
+            _ => {
+                settings_section(ui, "Diagnostics");
+                h.check(
+                    ui,
+                    &mut s.diagnostic_log,
+                    "Write a diagnostic log (data/noirview.log)",
+                );
+                h.check(
+                    ui,
+                    &mut s.window_diagnostics,
+                    "Window size diagnostics: draw the window's edges and the pointer as NoirView sees them",
+                );
+                ui.label(
+                    "Also writes window and surface sizes to data/noirview-window.log while on.",
                 );
             }
         }
@@ -10868,6 +11288,10 @@ ui.label(format!("{} image(s) and their metadata sidecars will be moved to Recyc
 if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
             Dialog::RestoreDeleted(paths)=>{ui.heading("Restore from Recycle Bin?");
 ui.label(format!("{} image(s) deleted last will be moved back to their folders.",paths.len()));for line in delete_dialog_lines(&paths){ui.label(line);}ui.horizontal(|ui|{if self.hover.button(ui,"Restore",false,!self.busy && !self.view_pending,false){self.restore_deleted();close=true;}
+if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
+            Dialog::ResetSettingsPage(page)=>{ui.heading(format!("Reset {}?", SETTINGS_PAGES[page]));
+ui.label("The settings on this page go back to their defaults. Folder lists, chosen folders and files, and profiles stay.");
+ui.horizontal(|ui|{if self.hover.button(ui,"Reset",false,true,true){self.lib.settings.reset_values(SETTINGS_RESET[page]);self.sync_history_limit();self.images.invalidate();self.changed();close=true;}
 if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
             Dialog::DeleteProfile(name)=>{ui.heading(format!("Delete the profile \"{name}\"?"));
 ui.label("The settings in use stay as they are.");
@@ -13982,6 +14406,70 @@ mod tests {
         assert_eq!(v.lib.settings.hover_preview_ms, 1200);
         v.exit_move_grid();
         assert_eq!(v.lib.settings.hover_preview_ms, 400);
+    }
+    #[test]
+    fn settings_pages_draw_search_and_reset() {
+        let ctx = egui::Context::default();
+        let mut v = browsing_viewer(&ctx, 3);
+        // Every page draws.
+        for page in 0..SETTINGS_PAGES.len() {
+            let mut invalidate = false;
+            let mut actions = vec![];
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    v.settings_controls(ui, page, &mut invalidate, &mut actions);
+                });
+            });
+            // Folders & tags asks for the service's state when shown.
+            actions.retain(|a| *a != "usn_refresh");
+            assert!(
+                actions.is_empty(),
+                "page {page} acted by itself: {actions:?}"
+            );
+        }
+        // Search: "circle" is on the Grid page only; "lens" on Image view.
+        let count = |v: &mut Viewer, q: &str| {
+            v.settings_query = q.into();
+            let mut counts = vec![];
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    counts = v.settings_search_counts(ui);
+                });
+            });
+            counts
+        };
+        let circle = count(&mut v, "Circle");
+        assert_eq!(circle.len(), SETTINGS_PAGES.len());
+        assert!(circle[2] >= 3, "{circle:?}");
+        assert_eq!(circle.iter().sum::<usize>(), circle[2]);
+        assert!(count(&mut v, "lens")[0] >= 1);
+        assert!(count(&mut v, "").is_empty(), "no search");
+        assert!(v.hover.search.is_empty() && v.hover.found.is_empty());
+        // Reset: the page's settings back, folders and lists kept.
+        let all = serde_json::to_value(Settings::default()).unwrap();
+        let keep = [
+            "destination",
+            "favorite_folders",
+            "watched_folders",
+            "music",
+            "profiles",
+            "thumbnail_cache_dir",
+            "model_path",
+            "ort_library",
+            "backup_extra",
+            "delete_pos",
+        ];
+        for keys in SETTINGS_RESET {
+            for key in keys {
+                assert!(all.get(*key).is_some(), "{key} is not a setting");
+                assert!(!keep.contains(key), "{key} is not reset");
+            }
+        }
+        v.lib.settings.lens_zoom = 9.;
+        v.lib.settings.destination = "/kept".into();
+        v.lib.settings.reset_values(SETTINGS_RESET[0]);
+        assert_eq!(v.lib.settings.lens_zoom, Settings::default().lens_zoom);
+        assert_eq!(v.lib.settings.destination, PathBuf::from("/kept"));
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {

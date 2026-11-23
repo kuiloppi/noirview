@@ -821,6 +821,14 @@ impl Settings {
         });
         self.initialize_after_load();
     }
+    /// These settings back to their defaults.
+    pub fn reset_values(&mut self, keys: &[&str]) {
+        let mut defaults = Settings::default();
+        defaults.initialize_after_load();
+        let values = defaults.values_of(keys);
+        self.set_values(&values, |k| keys.contains(&k));
+        self.initialize_after_load();
+    }
     /// These settings, by their saved names.
     fn values_of(&self, keys: &[&str]) -> serde_json::Map<String, serde_json::Value> {
         let mut values = match serde_json::to_value(self) {
