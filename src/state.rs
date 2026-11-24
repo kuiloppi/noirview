@@ -11,6 +11,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 #[cfg(test)]
 #[path = "identity_state_tests.rs"]
 mod identity_state_tests;
+#[cfg(test)]
+mod scale_bench;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

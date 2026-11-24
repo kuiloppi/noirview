@@ -228,6 +228,7 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "prefetch_behind",
         "thumbnail_cache_mb",
         "cache_mb",
+        "memory_use",
         "low_latency_display",
         "graphics_backend",
         "remember_window",
@@ -253,7 +254,11 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "gesture_min_px",
         "gesture_max_ms",
     ],
-    &["diagnostic_log", "window_diagnostics"],
+    &[
+        "settings_search_opacity",
+        "diagnostic_log",
+        "window_diagnostics",
+    ],
 ];
 const SETTINGS_FOLDERS: usize = 5;
 const SETTINGS_PROFILES: usize = 9;
@@ -555,6 +560,8 @@ struct Hover {
     search: String,
     /// Search with typos allowed (Settings' Looser matching).
     loose: bool,
+    /// Opacity of the search outlines.
+    outline: f32,
     found: Vec<String>,
     /// Where the first match was drawn.
     first_found: Option<Rect>,
@@ -570,12 +577,16 @@ impl Hover {
         ui.painter().rect_stroke(
             rect.expand(3.),
             4.,
-            Stroke::new(1.5_f32, Color32::from_rgb(240, 200, 80)),
+            Stroke::new(
+                1.5_f32,
+                Color32::from_rgb(240, 200, 80).gamma_multiply(self.outline.clamp(0.1, 1.)),
+            ),
             egui::StrokeKind::Outside,
         );
     }
     fn begin(&mut self, s: &Settings) {
         self.responses.clear();
+        self.outline = s.settings_search_opacity;
         self.general = s.hover;
         self.trash = s.hover_trash();
         self.settings = s.hover_settings();
@@ -2090,7 +2101,12 @@ pub struct Viewer {
     flash_button: Option<(&'static str, Instant)>,
     /// Random / Shuffle grid pages.
     grid_pages: crate::grid_pages::Pages,
-    memory_high: bool,
+    /// Memory pressure from this process, the system's free RAM and the
+    /// graphics card (`memory::Guard`), checked once a second.
+    memory_guard: crate::memory::Guard,
+    memory_probe: crate::memory::Probe,
+    pub machine: crate::memory::Machine,
+    memory_checked: Option<Instant>,
     /// Animated GIF frames for the big image.
     gif_player: crate::animation::Player,
     health_checked: Instant,
@@ -2342,7 +2358,10 @@ impl Viewer {
             last_selection: None,
             flash_button: None,
             grid_pages: Default::default(),
-            memory_high: false,
+            memory_guard: Default::default(),
+            memory_probe: crate::memory::Probe::new(),
+            machine: Default::default(),
+            memory_checked: None,
             gif_player: crate::animation::Player::default(),
             health_checked: Instant::now(),
             health_logged: Instant::now(),
@@ -4503,7 +4522,7 @@ impl Viewer {
             }
             // An animated GIF plays over the first frame once its frames exist.
             // Not during the memory emergency brake.
-            let frame = if self.lib.settings.animate_gif && !self.memory_high {
+            let frame = if self.lib.settings.animate_gif && !self.memory_critical() {
                 let filter = if self.lib.settings.upscale == Upscale::Nearest {
                     egui::TextureOptions::NEAREST
                 } else {
@@ -9268,8 +9287,9 @@ impl Viewer {
                                 .hint_text("Search settings")
                                 .desired_width(134.),
                         );
+                        let search_id = search.id;
                         self.hover.watch(search, false);
-                        // × empties the search.
+                        // × empties the search and leaves the cursor in the field.
                         let clear = ui
                             .add_enabled(
                                 !self.settings_query.is_empty(),
@@ -9278,6 +9298,7 @@ impl Viewer {
                             .on_hover_text("Clear the search");
                         if self.hover.watch(clear, false).clicked() {
                             self.settings_query.clear();
+                            ui.memory_mut(|m| m.request_focus(search_id));
                         }
                     });
                     let mut loose = self.lib.settings.settings_search_loose;
@@ -10897,16 +10918,56 @@ impl Viewer {
                     actions.push("clear_thumbnails");
                 }
                 h.section(ui, "Memory");
-                h.slider(
-                    ui,
-                    &mut s.cache_mb,
-                    64..=4096,
-                    "Texture / decoder memory budget (MiB)",
-                );
+                ui.horizontal_wrapped(|ui| {
+                    h.note(ui, "Memory use");
+                    for choice in crate::model::MemoryUse::ALL {
+                        if h.button(ui, choice.label(), s.memory_use() == choice, true, false) {
+                            s.memory_use = Some(choice);
+                            s.cache_mb =
+                                crate::memory::image_budget_mb(choice, s.cache_mb, &self.machine);
+                        }
+                    }
+                });
                 h.note(
                     ui,
-                    format!("Cached textures: {} MiB", self.images.memory_mb()),
+                    "Low, Balanced and High size the memory for images (full images, first views and thumbnails) from this computer's RAM and graphics card; Custom uses the value set below. When memory runs short, fewer images are kept ready, and at worst only the image on screen.",
                 );
+                if s.memory_use() == crate::model::MemoryUse::Custom {
+                    h.slider(ui, &mut s.cache_mb, 64..=8192, "Image memory budget (MiB)");
+                } else {
+                    h.note(ui, format!("Image memory budget: {} MiB", s.cache_mb));
+                }
+                h.note(
+                    ui,
+                    format!(
+                        "Images in memory now: {} MiB · memory now: {}",
+                        self.images.memory_mb(),
+                        self.memory_guard.level.label()
+                    ),
+                );
+                let m = &self.machine;
+                let mut computer = format!(
+                    "This computer: RAM {} ({} free)",
+                    m.ram_total.map_or("unknown".into(), crate::memory::size),
+                    m.ram_available
+                        .map_or("unknown".into(), crate::memory::size)
+                );
+                if let Some(gpu) = &m.gpu {
+                    computer.push_str(&format!(
+                        " · {}: {}{}",
+                        gpu.name,
+                        crate::memory::size(gpu.dedicated),
+                        match (gpu.usage, gpu.budget) {
+                            (Some(u), Some(b)) => format!(
+                                " (NoirView uses {} of the {} it may use)",
+                                crate::memory::size(u),
+                                crate::memory::size(b)
+                            ),
+                            _ => String::new(),
+                        }
+                    ));
+                }
+                h.note(ui, computer);
                 h.section(ui, "Display");
                 h.check(
                     ui,
@@ -11164,6 +11225,17 @@ impl Viewer {
                 );
             }
             _ => {
+                h.section(ui, "Settings window");
+                h.slider(
+                    ui,
+                    &mut s.settings_search_opacity,
+                    0.1..=1.0,
+                    "Search outline opacity",
+                );
+                h.note(
+                    ui,
+                    "The outline round settings that match the search in the page column.",
+                );
                 h.section(ui, "Diagnostics");
                 h.check(
                     ui,
@@ -12190,21 +12262,80 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             }
         }
     }
+    fn memory_tight(&self) -> bool {
+        self.memory_guard.level >= crate::memory::Pressure::Tight
+    }
+    fn memory_critical(&self) -> bool {
+        self.memory_guard.level == crate::memory::Pressure::Critical
+    }
+    /// The image budget for the chosen Memory use on this machine (Custom:
+    /// the value set by hand).
+    fn apply_memory_use(&mut self) {
+        let s = &mut self.lib.settings;
+        let choice = s.memory_use();
+        s.cache_mb = crate::memory::image_budget_mb(choice, s.cache_mb, &self.machine);
+    }
+    /// Once a second: reads the machine's memory, sizes the image budget and
+    /// sets how much of it may be used now (memory pressure).
+    fn memory_check(&mut self) {
+        let now = Instant::now();
+        if self
+            .memory_checked
+            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.memory_checked = Some(now);
+        self.machine = self.memory_probe.read();
+        self.apply_memory_use();
+        let s = &self.lib.settings;
+        let reading = crate::memory::Reading {
+            process: crate::sysinfo::process_memory(),
+            limit: crate::memory::process_limit(s.memory_use(), s.cache_mb, &self.machine),
+            ram_total: self.machine.ram_total,
+            ram_available: self.machine.ram_available,
+            gpu_usage: self.machine.gpu.as_ref().and_then(|g| g.usage),
+            gpu_budget: self.machine.gpu.as_ref().and_then(|g| g.budget),
+        };
+        if let Some(level) = self.memory_guard.update(reading, now) {
+            use crate::memory::Pressure;
+            match level {
+                Pressure::Tight => self.notify(
+                    "Memory is getting low: fewer images kept ready, background work paused",
+                ),
+                Pressure::Critical => self.notify(
+                    "High memory use: only the image on screen is kept, background work paused",
+                ),
+                Pressure::Normal => {}
+            }
+            let summary = format!(
+                "Memory {}: process {} of {}, RAM free {}, graphics card {}",
+                level.label(),
+                reading.process.map_or("-".into(), crate::memory::size),
+                crate::memory::size(reading.limit),
+                reading
+                    .ram_available
+                    .map_or("-".into(), crate::memory::size),
+                match (reading.gpu_usage, reading.gpu_budget) {
+                    (Some(u), Some(b)) =>
+                        format!("{} of {}", crate::memory::size(u), crate::memory::size(b)),
+                    _ => "-".into(),
+                }
+            );
+            self.log_line(&summary);
+        }
+        self.images
+            .set_pressure(self.memory_guard.level.budget_share());
+    }
     /// Once a second: memory guard. Every five seconds, when enabled: one line in
     /// data/noirview.log (rotated at 4 MiB) for diagnosing slowdowns.
     fn health(&mut self) {
-        const MEMORY_LIMIT: u64 = 6 * 1024 * 1024 * 1024;
         let now = Instant::now();
         if now.duration_since(self.health_checked) < Duration::from_secs(1) {
             return;
         }
         self.health_checked = now;
-        let memory = crate::sysinfo::process_memory();
-        let high = memory.is_some_and(|m| m > MEMORY_LIMIT);
-        if high && !self.memory_high {
-            self.notify("High memory use: background preloading paused");
-        }
-        self.memory_high = high;
+        let memory = self.memory_guard.last.process;
         if !self.lib.settings.diagnostic_log
             || now.duration_since(self.health_logged) < Duration::from_secs(5)
         {
@@ -12234,16 +12365,25 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         let thumbs = crate::decode_stats::take().unwrap_or_else(|| "-".into());
         let paint = paint_summary(&eframe::noirview_diag::take_paint_stats());
         let line = format!(
-            "{} mem={}MiB textures={}MiB grid={} page={} index={} memory_guard={} thumbs=[{}] paint=[{}]\n",
+            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} thumbs=[{}] paint=[{}]\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
             memory.map_or(0, |m| m / (1024 * 1024)),
             self.images.memory_mb(),
+            self.lib.settings.cache_mb,
             self.grid,
             page,
             index,
-            self.memory_high,
+            self.memory_guard.level.label(),
+            self.machine
+                .ram_available
+                .map_or("-".into(), crate::memory::size),
+            self.machine.gpu.as_ref().map_or("-".into(), |g| format!(
+                "{}/{}",
+                g.usage.map_or("-".into(), crate::memory::size),
+                g.budget.map_or("-".into(), crate::memory::size)
+            )),
             thumbs,
             paint,
         );
@@ -12293,6 +12433,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
     }
     fn image_demand(&mut self, ctx: &egui::Context) -> HashSet<crate::imaging::Key> {
         self.sync_history_limit();
+        self.memory_check();
         self.images
             .configure(&self.lib.settings, ctx.input(|i| i.max_texture_side) as u32);
         self.sync_pregen();
@@ -12356,8 +12497,17 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                         &self.visible,
                         Some(path),
                         order,
-                        self.lib.settings.prefetch_ahead,
-                        self.lib.settings.prefetch_behind,
+                        // Tight memory: only the nearest images ahead and behind.
+                        if self.memory_tight() {
+                            self.lib.settings.prefetch_ahead.min(2)
+                        } else {
+                            self.lib.settings.prefetch_ahead
+                        },
+                        if self.memory_tight() {
+                            self.lib.settings.prefetch_behind.min(1)
+                        } else {
+                            self.lib.settings.prefetch_behind
+                        },
                     )
                     .into_iter()
                     .map(|p| self.images.key(p, false)),
@@ -12368,7 +12518,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             high.extend(recent.into_iter().map(|p| self.images.key(p, true)));
         }
         self.health();
-        if self.memory_high || self.grid_viewer.is_some() {
+        if self.memory_critical() || self.grid_viewer.is_some() {
             // Safety guard: keep showing what is on screen, skip speculative work.
             low.clear();
         }
@@ -12619,12 +12769,12 @@ impl eframe::App for Viewer {
             crate::pregen::set_blocked(
                 (!raw.focused && !s.cache_when_unfocused)
                     || self.index_progress.is_some()
-                    || self.memory_high,
+                    || self.memory_tight(),
             );
             crate::pregen::note_frame(
                 !raw.events.is_empty(),
                 raw.focused,
-                self.index_progress.is_some() || self.memory_high,
+                self.index_progress.is_some() || self.memory_tight(),
                 s.watch_while_active,
                 s.watch_when_unfocused,
             );

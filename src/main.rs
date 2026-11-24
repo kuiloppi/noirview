@@ -4,6 +4,9 @@ mod app;
 mod audio;
 mod bar_layout;
 mod clipboard;
+// Catalog foundation for large collections; not wired in yet.
+#[allow(dead_code)]
+mod catalog;
 mod comfy;
 mod decode_stats;
 mod dialog_place;
@@ -22,12 +25,18 @@ mod jpeg_preview;
 mod jpeg_scaled;
 mod keyword_index;
 mod magnifier;
+mod memory;
 mod metadata;
 mod model;
 mod operations;
 mod pregen;
 mod repaint;
 mod resize;
+// Compact lists for large folders; not wired in yet.
+#[cfg(test)]
+mod scale_bench;
+#[allow(dead_code)]
+mod scope;
 mod sorting;
 mod startup;
 mod state;

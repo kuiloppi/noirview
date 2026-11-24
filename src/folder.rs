@@ -1,4 +1,6 @@
 //! Deliver filenames first; populate a persistent keyword index independently.
+#[cfg(test)]
+mod scale_bench;
 use crate::{
     keyword_index::{self, CachedKeywords, Fingerprint, KeywordIndex},
     metadata,
@@ -54,6 +56,15 @@ impl FileSnapshot {
             members: paths.iter().cloned().collect(),
         }
     }
+}
+/// The note on skipped unreadable entries when their number changed since
+/// the last scan of the folder (none for none).
+fn skip_change(previous: &mut usize, scanned: &model::Scanned) -> Option<String> {
+    if scanned.skipped == *previous {
+        return None;
+    }
+    *previous = scanned.skipped;
+    scanned.skip_note()
 }
 #[derive(Debug)]
 pub enum Update {
@@ -282,8 +293,12 @@ fn run(
             None
         }
     };
-    let mut files = match model::scan(&folder, recursive) {
-        Ok(f) => f,
+    let mut skipped = 0;
+    let (mut files, skip_note) = match model::scan(&folder, recursive) {
+        Ok(scanned) => {
+            let note = skip_change(&mut skipped, &scanned);
+            (scanned.paths, note)
+        }
         Err(e) => {
             send(Update::Error(format!("{e:#}")));
             return;
@@ -291,6 +306,11 @@ fn run(
     };
     if !current() || !send(Update::Files(FileSnapshot::new(&files))) {
         return;
+    }
+    // Unreadable entries were skipped: said once, again only when their
+    // number changes.
+    if let Some(note) = skip_note {
+        send(Update::Warning(note));
     }
     let mut index = database.and_then(|p| match KeywordIndex::open(&p) {
         Ok(i) => Some(i),
@@ -384,7 +404,11 @@ fn run(
                 incoming.rescan || incoming.refresh_all || !incoming.dirty.is_empty();
             if incoming.rescan {
                 match model::scan(&folder, recursive) {
-                    Ok(next) => {
+                    Ok(scanned) => {
+                        if let Some(note) = skip_change(&mut skipped, &scanned) {
+                            send(Update::Warning(note));
+                        }
+                        let next = scanned.paths;
                         if next != files {
                             let valid: HashSet<_> =
                                 next.iter().map(|p| keyword_index::key(p)).collect();
@@ -649,6 +673,23 @@ pub fn apply_keywords(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skipped_entries_are_reported_once_and_again_only_when_their_number_changes() {
+        let scanned = |skipped: usize| model::Scanned {
+            paths: vec![],
+            skipped,
+            first_skipped: (skipped > 0).then(|| "locked".to_string()),
+        };
+        let mut previous = 0;
+        assert_eq!(skip_change(&mut previous, &scanned(0)), None);
+        assert!(skip_change(&mut previous, &scanned(1)).is_some());
+        // The same skipped entry on a rescan: nothing new to say.
+        assert_eq!(skip_change(&mut previous, &scanned(1)), None);
+        assert!(skip_change(&mut previous, &scanned(2)).is_some());
+        // All readable again: no note, but a later failure is reported.
+        assert_eq!(skip_change(&mut previous, &scanned(0)), None);
+        assert!(skip_change(&mut previous, &scanned(1)).is_some());
+    }
     use std::{
         fs,
         sync::atomic::{AtomicBool, AtomicUsize},
@@ -990,7 +1031,7 @@ mod tests {
                 _ => {}
             }
         }
-        let expected = model::scan(dir.path(), false).unwrap();
+        let expected = model::scan(dir.path(), false).unwrap().paths;
         assert_eq!(files, expected);
         assert_eq!(tags.len(), expected.len());
         assert_eq!(tags[&paths[0]], BTreeSet::from(["new".into()]));

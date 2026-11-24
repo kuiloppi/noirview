@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod scale_bench;
 pub use crate::image_queue::Key;
 use crate::image_queue::{PrefetchDeferred, Prepared, Request, WorkQueue};
 use crate::model::{Settings, Upscale};
@@ -127,6 +129,8 @@ pub struct Images {
     tick: u64,
     pub warning: Option<String>,
     prefetch: Vec<Key>,
+    /// The share of the memory budget usable now (`memory::Pressure`).
+    share: f64,
     pub disk_cache: Arc<ThumbnailCache>,
     /// Screen-sized first views of large images, in their own database and
     /// budget so they never evict thumbnails.
@@ -327,6 +331,7 @@ impl Images {
             tick: 0,
             warning: None,
             prefetch: Vec::new(),
+            share: 1.,
             disk_cache: Arc::new(ThumbnailCache::new(None, 0)),
             proxy_cache: Arc::new(ThumbnailCache::new(None, 0)),
         }
@@ -425,6 +430,17 @@ impl Images {
             revision: self.revision,
         }
     }
+    /// Use only this share of the memory budget (memory pressure): less is
+    /// kept ready, and textures over it go at the next plan.
+    pub fn set_pressure(&mut self, share: f64) {
+        self.share = share.clamp(0., 1.);
+        self.queue.set_share(self.share);
+        self.thumbs.set_share(self.share);
+    }
+    /// Bytes of textures that may be kept now.
+    fn budget(&self, s: &Settings) -> usize {
+        (s.cache_mb.max(64) as f64 * 1024. * 1024. * self.share) as usize
+    }
     pub fn plan(&mut self, high: &[Key], low: &[Key], s: &Settings, max_side: u32) {
         let mut costs = self.queue.costs();
         costs.extend(self.thumbs.costs());
@@ -444,7 +460,7 @@ impl Images {
             } as usize;
             side * side * 4
         };
-        let budget = s.cache_mb.max(64) * 1024 * 1024;
+        let budget = self.budget(s);
         let wanted: HashSet<_> = high.iter().chain(low).cloned().collect();
         let orphan = self.queue.orphan_bytes(&wanted) + self.thumbs.orphan_bytes(&wanted);
         let foreground_bytes: usize = high
@@ -573,7 +589,7 @@ impl Images {
         if self.queue.has_ready() || self.thumbs.has_ready() {
             ctx.request_repaint();
         }
-        let budget = s.cache_mb.max(64) * 1024 * 1024;
+        let budget = self.budget(s);
         self.trim_cache(budget, keep);
     }
     fn trim_cache(&mut self, budget: usize, keep: &HashSet<Key>) {
@@ -1626,6 +1642,39 @@ mod tests {
         );
     }
     #[test]
+    fn memory_pressure_keeps_less_and_at_worst_only_what_is_on_screen() {
+        let ctx = egui::Context::default();
+        let mut images = Images::with_decoder(ctx.clone(), |_, _| Ok(sample()));
+        let s = Settings {
+            cache_mb: 64,
+            ..Settings::default()
+        };
+        // Four textures of 10 MiB each fit the 64 MiB budget.
+        let keys: Vec<Key> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|p| images.key(PathBuf::from(p), false))
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            insert_texture(&mut images, &ctx, key.clone());
+            let t = images.textures.get_mut(key).unwrap();
+            t.bytes = 10 * 1024 * 1024;
+            t.used = i as u64;
+        }
+        let on_screen = std::slice::from_ref(&keys[3]);
+        images.plan(on_screen, &[], &s, 8192);
+        assert_eq!(images.textures.len(), 4);
+        // Tight: half the budget, the least recently used go first.
+        images.set_pressure(crate::memory::Pressure::Tight.budget_share());
+        images.plan(on_screen, &[], &s, 8192);
+        assert_eq!(images.textures.len(), 3);
+        assert!(!images.textures.contains_key(&keys[0]));
+        // Critical: only the image on screen stays.
+        images.set_pressure(crate::memory::Pressure::Critical.budget_share());
+        images.plan(on_screen, &[], &s, 8192);
+        assert_eq!(images.textures.keys().collect::<Vec<_>>(), vec![&keys[3]]);
+        images.stop();
+    }
+    #[test]
     fn page_preparation_time_counts_overlapping_work_once_and_clearing_forgets_small_textures() {
         let ctx = egui::Context::default();
         let mut images = Images::with_decoder(ctx.clone(), |_, _| Ok(sample()));
@@ -1969,6 +2018,7 @@ mod tests {
             tick: 0,
             warning: None,
             prefetch: Vec::new(),
+            share: 1.,
             disk_cache: Arc::new(ThumbnailCache::new(None, 0)),
             proxy_cache: Arc::new(ThumbnailCache::new(None, 0)),
         };

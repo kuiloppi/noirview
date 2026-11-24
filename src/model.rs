@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod scale_bench;
 mod view_build;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -167,6 +169,27 @@ impl WatchPace {
             Self::Gentle => "Gentle",
             Self::Balanced => "Balanced",
             Self::Fast => "Fast",
+        }
+    }
+}
+/// How much memory images may take: chosen from the machine's RAM and
+/// graphics card (Low / Balanced / High) or set by hand (Custom).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryUse {
+    Low,
+    #[default]
+    Balanced,
+    High,
+    Custom,
+}
+impl MemoryUse {
+    pub const ALL: [Self; 4] = [Self::Low, Self::Balanced, Self::High, Self::Custom];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Balanced => "Balanced",
+            Self::High => "High",
+            Self::Custom => "Custom",
         }
     }
 }
@@ -443,6 +466,8 @@ pub struct Settings {
     pub move_grid_frame: bool,
     /// Settings' search allows typos and word starts.
     pub settings_search_loose: bool,
+    /// Opacity of the outlines round settings that match the search.
+    pub settings_search_opacity: f32,
     pub move_grid_frame_width: f32,
     pub move_grid_frame_color: [u8; 4],
     pub move_grid_frame_opacity: f32,
@@ -531,7 +556,11 @@ pub struct Settings {
     pub music: Vec<PathBuf>,
     pub music_shuffle: bool,
     pub volume: f32,
+    /// The image memory budget (MiB); with Memory use other than Custom it
+    /// follows the machine (`memory::image_budget_mb`).
     pub cache_mb: usize,
+    /// None: settings from before 0.1.75 (Custom if the budget was changed).
+    pub memory_use: Option<MemoryUse>,
     pub upscale: Upscale,
     pub upscale_factor: u32,
     pub sharpen: f32,
@@ -662,6 +691,7 @@ impl Default for Settings {
             move_mark_offset: [0., 30.],
             move_grid_frame: true,
             settings_search_loose: false,
+            settings_search_opacity: 1.,
             move_grid_frame_width: 4.,
             move_grid_frame_color: [90, 160, 255, 255],
             move_grid_frame_opacity: 0.8,
@@ -757,6 +787,7 @@ impl Default for Settings {
             music_shuffle: false,
             volume: 0.7,
             cache_mb: 768,
+            memory_use: None,
             upscale: Upscale::Linear,
             upscale_factor: 2,
             sharpen: 0.45,
@@ -938,6 +969,15 @@ impl Settings {
         self.hover_settings.get_or_insert(self.hover);
         self.hover_move.get_or_insert(self.hover);
         self.bar_bottom_grid.get_or_insert(self.bar_bottom);
+        // A budget changed by hand before Memory use existed stays as it was.
+        self.memory_use.get_or_insert(if self.cache_mb == 768 {
+            MemoryUse::Balanced
+        } else {
+            MemoryUse::Custom
+        });
+    }
+    pub fn memory_use(&self) -> MemoryUse {
+        self.memory_use.unwrap_or_default()
     }
     pub fn bar_bottom_grid(&self) -> f32 {
         self.bar_bottom_grid.unwrap_or(self.bar_bottom)
@@ -1021,6 +1061,7 @@ pub const PROFILE_EXCLUDED: &[&str] = &[
     "proxy_cache_mb",
     "proxy_min_side",
     "cache_mb",
+    "memory_use",
     "animation_mb",
     "prefetch_ahead",
     "prefetch_behind",
@@ -1693,24 +1734,114 @@ pub fn supported(path: &Path) -> bool {
         })
         .unwrap_or(false)
 }
-pub fn scan(folder: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
-    let mut paths = vec![];
-    for item in walkdir::WalkDir::new(folder)
+/// One entry of a folder walk.
+pub enum ScanEntry {
+    File(PathBuf),
+    /// A folder or anything else that is not an image file.
+    Other,
+    /// An entry that could not be read; depth 0 is the opened folder itself.
+    Failed {
+        depth: usize,
+        message: String,
+    },
+}
+/// The images of a folder (sorted by path) and what could not be read.
+#[derive(Debug, Default, PartialEq)]
+pub struct Scanned {
+    pub paths: Vec<PathBuf>,
+    /// Entries below the opened folder that could not be read and were skipped.
+    pub skipped: usize,
+    pub first_skipped: Option<String>,
+}
+impl Scanned {
+    /// The note for skipped entries, if any.
+    pub fn skip_note(&self) -> Option<String> {
+        (self.skipped > 0).then(|| {
+            format!(
+                "{} unreadable item(s) in the folder were skipped ({})",
+                self.skipped,
+                self.first_skipped.as_deref().unwrap_or("no details")
+            )
+        })
+    }
+}
+pub fn scan(folder: &Path, recursive: bool) -> anyhow::Result<Scanned> {
+    let walk = walkdir::WalkDir::new(folder)
         .follow_links(false)
         .max_depth(if recursive { usize::MAX } else { 1 })
-    {
-        let e = item?;
-        if e.file_type().is_file() && supported(e.path()) {
-            paths.push(e.path().to_path_buf());
+        .into_iter()
+        .map(|item| match item {
+            Ok(e) if e.file_type().is_file() => ScanEntry::File(e.into_path()),
+            Ok(_) => ScanEntry::Other,
+            Err(e) => ScanEntry::Failed {
+                depth: e.depth(),
+                message: e.to_string(),
+            },
+        });
+    collect_scan(walk)
+}
+/// Keeps the supported image files; an unreadable entry below the opened
+/// folder is counted and skipped, the opened folder itself unreadable is an
+/// error.
+pub fn collect_scan(entries: impl IntoIterator<Item = ScanEntry>) -> anyhow::Result<Scanned> {
+    let mut scanned = Scanned::default();
+    for entry in entries {
+        match entry {
+            ScanEntry::File(path) if supported(&path) => scanned.paths.push(path),
+            ScanEntry::File(_) | ScanEntry::Other => {}
+            ScanEntry::Failed { depth: 0, message } => anyhow::bail!(message),
+            ScanEntry::Failed { message, .. } => {
+                scanned.skipped += 1;
+                scanned.first_skipped.get_or_insert(message);
+            }
         }
     }
-    paths.sort_by_cached_key(|p| p.to_string_lossy().to_lowercase());
-    Ok(paths)
+    scanned
+        .paths
+        .sort_by_cached_key(|p| p.to_string_lossy().to_lowercase());
+    Ok(scanned)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    #[test]
+    fn a_scan_skips_unreadable_entries_below_the_folder_and_fails_on_the_folder() {
+        let file = |name: &str| ScanEntry::File(PathBuf::from(name));
+        let failed = |depth: usize, message: &str| ScanEntry::Failed {
+            depth,
+            message: message.into(),
+        };
+        let scanned = collect_scan([
+            file("/f/b.jpg"),
+            ScanEntry::Other,
+            failed(2, "/f/sub/locked: access denied"),
+            file("/f/notes.txt"),
+            file("/f/A.png"),
+            failed(1, "/f/other: access denied"),
+        ])
+        .unwrap();
+        assert_eq!(
+            scanned.paths,
+            vec![PathBuf::from("/f/A.png"), PathBuf::from("/f/b.jpg")]
+        );
+        assert_eq!(scanned.skipped, 2);
+        assert_eq!(
+            scanned.first_skipped.as_deref(),
+            Some("/f/sub/locked: access denied")
+        );
+        assert!(scanned
+            .skip_note()
+            .unwrap()
+            .starts_with("2 unreadable item(s)"));
+        let error = collect_scan([file("/f/a.jpg"), failed(0, "/f: access denied")]).unwrap_err();
+        assert_eq!(error.to_string(), "/f: access denied");
+        // Nothing skipped: no note.
+        let clean = collect_scan([file("/f/a.jpg")]).unwrap();
+        assert_eq!((clean.skipped, clean.skip_note()), (0, None));
+        // A folder that does not exist is still an error.
+        assert!(scan(Path::new("/no/such/folder/anywhere"), true).is_err());
+    }
     #[test]
     fn a_profile_keeps_display_and_interaction_settings_only() {
         let mut s = Settings {
@@ -1898,6 +2029,15 @@ mod tests {
         assert!(!old.lens_border && old.jpeg_preview);
         assert!(!old.lens_soft_edges && old.lens_full_window && old.magnifier);
         assert_eq!(old.cache_mb, 256);
+        // Memory use: a budget changed by hand stays (Custom), the old
+        // default follows the machine (Balanced).
+        let mut changed = old.clone();
+        changed.initialize_after_load();
+        assert_eq!(changed.memory_use(), MemoryUse::Custom);
+        let mut unchanged: Settings = serde_json::from_str(r#"{"cache_mb":768}"#).unwrap();
+        unchanged.initialize_after_load();
+        assert_eq!(unchanged.memory_use(), MemoryUse::Balanced);
+        assert_eq!(Settings::default().memory_use(), MemoryUse::Balanced);
         let settings = Settings {
             prefetch_ahead: 0,
             prefetch_behind: 12,

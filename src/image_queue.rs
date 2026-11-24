@@ -76,6 +76,9 @@ struct Job {
 }
 #[derive(Default)]
 struct State {
+    /// The share of the memory budget usable now (`memory::Pressure`);
+    /// None: all of it.
+    share: Option<f64>,
     jobs: HashMap<Key, Job>,
     high: VecDeque<Key>,
     low: VecDeque<Key>,
@@ -223,6 +226,10 @@ impl WorkQueue {
         }
         self.wake.notify_all();
     }
+    /// Use only this share of the memory budget (memory pressure).
+    pub fn set_share(&self, share: f64) {
+        self.state.lock().unwrap().share = Some(share);
+    }
     pub fn plan(
         &self,
         focus: &[Key],
@@ -239,9 +246,10 @@ impl WorkQueue {
             s.focus = focus.to_vec();
             s.attempted_prefetch.clear();
         }
-        s.ready_budget = (settings.cache_mb.max(64) * 1024 * 1024 / 4)
-            .clamp(16 * 1024 * 1024, 256 * 1024 * 1024);
-        s.output_budget = settings.cache_mb.max(64) * 1024 * 1024;
+        let budget =
+            (settings.cache_mb.max(64) as f64 * 1024. * 1024. * s.share.unwrap_or(1.)) as usize;
+        s.ready_budget = (budget / 4).clamp(16 * 1024 * 1024, 256 * 1024 * 1024);
+        s.output_budget = budget;
         // UI pages are capped at 64; also bound admission at this boundary.
         let high = &high[..high.len().min(64)];
         let low = &low[..low.len().min(64)];
