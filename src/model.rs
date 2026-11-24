@@ -441,6 +441,8 @@ pub struct Settings {
     pub move_mark_offset: [f32; 2],
     /// A frame round the whole window while the Move grid is open.
     pub move_grid_frame: bool,
+    /// Settings' search allows typos and word starts.
+    pub settings_search_loose: bool,
     pub move_grid_frame_width: f32,
     pub move_grid_frame_color: [u8; 4],
     pub move_grid_frame_opacity: f32,
@@ -659,6 +661,7 @@ impl Default for Settings {
             move_mark_corner: "top_left".into(),
             move_mark_offset: [0., 30.],
             move_grid_frame: true,
+            settings_search_loose: false,
             move_grid_frame_width: 4.,
             move_grid_frame_color: [90, 160, 255, 255],
             move_grid_frame_opacity: 0.8,
@@ -720,7 +723,7 @@ impl Default for Settings {
             watch_background: false,
             watch_while_active: false,
             watch_when_unfocused: true,
-            watch_pace: WatchPace::Gentle,
+            watch_pace: WatchPace::Balanced,
             watch_use_journal: true,
             preview_close_px: 24.,
             preview_close_ms: 400,

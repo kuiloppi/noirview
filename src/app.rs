@@ -553,14 +553,16 @@ struct Hover {
     /// Settings' search (lower case): matching controls are outlined and
     /// their labels kept in `found`.
     search: String,
+    /// Search with typos allowed (Settings' Looser matching).
+    loose: bool,
     found: Vec<String>,
     /// Where the first match was drawn.
     first_found: Option<Rect>,
 }
 impl Hover {
-    /// A control whose label has the search words: outlined, listed.
+    /// A control, text or title with the search words: outlined, listed.
     fn found(&mut self, ui: &egui::Ui, rect: Rect, label: &str) {
-        if self.search.is_empty() || !label.to_lowercase().contains(&self.search) {
+        if self.search.is_empty() || !search_matches(label, &self.search, self.loose) {
             return;
         }
         self.found.push(label.to_owned());
@@ -674,6 +676,21 @@ impl Hover {
         }
         icons::paint(ui.painter(), response.rect.center(), icon, color);
         self.watch(response.on_hover_text(label), danger)
+    }
+    /// A text on a Settings page (found by the search too).
+    fn note(&mut self, ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+        let text: egui::WidgetText = text.into();
+        let words = text.text().to_owned();
+        let r = ui.label(text);
+        self.found(ui, r.rect, &words);
+        r
+    }
+    /// A section's title within a Settings page (found by the search too).
+    fn section(&mut self, ui: &mut egui::Ui, title: &str) {
+        ui.add_space(14.);
+        let r = ui.label(RichText::new(title).strong().size(15.).color(GREEN));
+        self.found(ui, r.rect, title);
+        ui.add_space(2.);
     }
     fn check(&mut self, ui: &mut egui::Ui, value: &mut bool, label: &str) {
         let r = ui.checkbox(value, label);
@@ -1009,6 +1026,45 @@ fn dialog_guid(kind: &str) -> u128 {
     0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000 + index as u128
 }
 
+/// Settings' search: every word of `query` (lower case) is in `text`, in
+/// any order; `loose` also takes a word with one letter wrong, missing or
+/// extra (two for long words) and the start of a word.
+fn search_matches(text: &str, query: &str, loose: bool) -> bool {
+    let text = text.to_lowercase();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    query.split_whitespace().all(|q| {
+        text.contains(q)
+            || (loose
+                && q.chars().count() >= 3
+                && words.iter().any(|w| {
+                    let allowed = if q.chars().count() >= 8 { 2 } else { 1 };
+                    w.starts_with(q) || edit_distance(w, q) <= allowed
+                }))
+    })
+}
+/// Letters to change, add or remove to turn one word into the other.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut previous = row[0];
+        row[0] = i;
+        for j in 1..=b.len() {
+            let here = row[j];
+            row[j] = if a[i - 1] == b[j - 1] {
+                previous
+            } else {
+                1 + previous.min(row[j]).min(row[j - 1])
+            };
+            previous = here;
+        }
+    }
+    row[b.len()]
+}
 /// A corner choice and the offset from it (Settings).
 fn corner_controls(
     ui: &mut egui::Ui,
@@ -1454,7 +1510,7 @@ fn bar_buttons_editor(
     s: &mut crate::model::Settings,
     tab: &mut &'static str,
 ) {
-    Viewer::settings_section(ui, "Buttons on the bars");
+    h.section(ui, "Buttons on the bars");
     ui.horizontal_wrapped(|ui| {
         for (bar, label) in [
             ("toolbar", "Toolbar"),
@@ -1975,6 +2031,10 @@ pub struct Viewer {
     /// Settings' search words, and the search and page last scrolled to.
     settings_query: String,
     settings_scrolled: Option<(String, usize)>,
+    /// The search last seen (a new one may change the page), and its
+    /// matches per page.
+    settings_last_query: String,
+    settings_counts: Vec<usize>,
     /// A profile to switch to (Settings or the right-click menu).
     pending_profile: Option<String>,
     /// Naming a profile: the one renamed (none: a new one) and the text.
@@ -2246,6 +2306,8 @@ impl Viewer {
             settings_move_target: false,
             settings_query: String::new(),
             settings_scrolled: None,
+            settings_last_query: String::new(),
+            settings_counts: Vec::new(),
             pending_profile: None,
             profile_edit: None,
             favorite_anchor: None,
@@ -9200,17 +9262,49 @@ impl Viewer {
                     ui.set_width(170.);
                     ui.heading("Settings");
                     ui.add_space(4.);
-                    let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.settings_query)
-                            .hint_text("Search settings")
-                            .desired_width(160.),
-                    );
-                    self.hover.watch(search, false);
+                    ui.horizontal(|ui| {
+                        let search = ui.add(
+                            egui::TextEdit::singleline(&mut self.settings_query)
+                                .hint_text("Search settings")
+                                .desired_width(134.),
+                        );
+                        self.hover.watch(search, false);
+                        // × empties the search.
+                        let clear = ui
+                            .add_enabled(
+                                !self.settings_query.is_empty(),
+                                egui::Button::new("×").frame(false),
+                            )
+                            .on_hover_text("Clear the search");
+                        if self.hover.watch(clear, false).clicked() {
+                            self.settings_query.clear();
+                        }
+                    });
+                    let mut loose = self.lib.settings.settings_search_loose;
+                    let r = ui.checkbox(&mut loose, RichText::new("Looser matching").size(12.));
+                    let r = r.on_hover_text("Also finds words with a letter wrong, missing or extra, and the start of a word");
+                    self.hover.watch(r, false);
+                    if loose != self.lib.settings.settings_search_loose {
+                        self.lib.settings.settings_search_loose = loose;
+                    }
                     ui.add_space(6.);
                     // Searching: how many controls of each page match.
                     let counts = self.settings_search_counts(ui);
+                    let none = !counts.is_empty() && counts.iter().all(|n| *n == 0);
+                    // A new search: to the first page with matches when the
+                    // page shown has none.
+                    let query = self.settings_query.trim().to_lowercase();
+                    if self.settings_last_query != query {
+                        self.settings_last_query = query;
+                        if counts.get(self.settings_tab) == Some(&0) {
+                            if let Some(first) = counts.iter().position(|n| *n > 0) {
+                                self.settings_tab = first;
+                            }
+                        }
+                    }
                     for (i, name) in SETTINGS_PAGES.iter().enumerate() {
-                        let chosen = self.settings_tab == i;
+                        // Nothing found: no page is chosen.
+                        let chosen = self.settings_tab == i && !none;
                         let label = match counts.get(i) {
                             Some(&n) if n > 0 => format!("{name}  ({n})"),
                             _ => (*name).to_owned(),
@@ -9252,6 +9346,32 @@ impl Viewer {
                     .max_height(height)
                     .show(ui, |ui| {
                         self.hover.search = self.settings_query.trim().to_lowercase();
+                        self.hover.loose = self.lib.settings.settings_search_loose;
+                        if self.settings_nothing_found() {
+                            // Nothing on any page: say so instead of a page.
+                            ui.add_space(40.);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "No settings match \"{}\"",
+                                        self.settings_query.trim()
+                                    ))
+                                    .size(18.)
+                                    .color(MUTED),
+                                );
+                                ui.add_space(6.);
+                                ui.label(
+                                    RichText::new(if self.lib.settings.settings_search_loose {
+                                        "Try fewer or other words."
+                                    } else {
+                                        "Try fewer or other words, or Looser matching."
+                                    })
+                                    .color(MUTED),
+                                );
+                            });
+                            self.hover.search.clear();
+                            return;
+                        }
                         self.hover.first_found = None;
                         self.settings_controls(ui, self.settings_tab, invalidate, actions);
                         // A new search or page: the first match in view.
@@ -9295,12 +9415,6 @@ impl Viewer {
             });
         });
     }
-    /// A section's title within a Settings page.
-    fn settings_section(ui: &mut egui::Ui, title: &str) {
-        ui.add_space(14.);
-        ui.label(RichText::new(title).strong().size(15.).color(GREEN));
-        ui.add_space(2.);
-    }
     /// The Grid page: whose grid settings it shows, the grid's or the Move
     /// grid's (marked images).
     fn grid_target_switch(&mut self, ui: &mut egui::Ui) {
@@ -9336,12 +9450,14 @@ impl Viewer {
     fn settings_search_counts(&mut self, ui: &mut egui::Ui) -> Vec<usize> {
         let query = self.settings_query.trim().to_lowercase();
         if query.is_empty() {
+            self.settings_counts.clear();
             return vec![];
         }
         let scroll = self.settings_scroll;
         let mut counts = vec![];
         for page in 0..SETTINGS_PAGES.len() {
             self.hover.search = query.clone();
+            self.hover.loose = self.lib.settings.settings_search_loose;
             self.hover.found.clear();
             let area = Rect::from_min_size(Pos2::new(-20000., -20000.), Vec2::new(600., 20000.));
             let mut unseen = ui.new_child(
@@ -9359,7 +9475,14 @@ impl Viewer {
         self.hover.search.clear();
         self.hover.found.clear();
         self.settings_scroll = scroll;
+        self.settings_counts = counts.clone();
         counts
+    }
+    /// A search that nothing on any page matches.
+    fn settings_nothing_found(&self) -> bool {
+        !self.settings_query.trim().is_empty()
+            && !self.settings_counts.is_empty()
+            && self.settings_counts.iter().all(|n| *n == 0)
     }
     fn settings_controls(
         &mut self,
@@ -9391,11 +9514,10 @@ impl Viewer {
         }
         let s = &mut self.lib.settings;
         let h = &mut self.hover;
-        let settings_section = Viewer::settings_section;
         match page {
             0 => {
-                settings_section(ui, "Image");
-                ui.label("Image sizing");
+                h.section(ui, "Image");
+                h.note(ui, "Image sizing");
                 ui.horizontal_wrapped(|ui| {
                     for mode in [DisplayMode::Fit, DisplayMode::Fill, DisplayMode::ShrinkOnly] {
                         if h.button(ui, mode.label(), s.view_mode() == mode, true, false) {
@@ -9403,7 +9525,7 @@ impl Viewer {
                         }
                     }
                 });
-                ui.label("Fit shows the whole image. Fill covers the window and crops the edges, keeping the aspect ratio. Shrink only does not enlarge small images.");
+                h.note(ui, "Fit shows the whole image. Fill covers the window and crops the edges, keeping the aspect ratio. Shrink only does not enlarge small images.");
                 h.check(
                     ui,
                     &mut s.animate_gif,
@@ -9417,8 +9539,8 @@ impl Viewer {
                         "Animated GIF memory limit (MB)",
                     );
                 });
-                ui.label(RichText::new("Frames are kept decoded in video memory while the GIF is shown. A larger animation shows its first frame; grid thumbnails always show the first frame.").color(MUTED));
-                settings_section(ui, "Magnifier");
+                h.note(ui, RichText::new("Frames are kept decoded in video memory while the GIF is shown. A larger animation shows its first frame; grid thumbnails always show the first frame.").color(MUTED));
+                h.section(ui, "Magnifier");
                 h.check(
                     ui,
                     &mut s.magnifier,
@@ -9430,14 +9552,14 @@ impl Viewer {
                 h.check(ui, &mut s.lens_soft_edges, "Soft magnifier edges");
                 h.slider(ui, &mut s.lens_feather_px, 1.0..=60.0, "Edge softness (px)");
                 h.check(ui, &mut s.lens_full_window, "Full-window zoom");
-                ui.label("Hold and move the left mouse button to magnify. Full-window zoom follows the pointer across the image viewing area; release to restore the view.");
-                settings_section(ui, "While an image loads");
+                h.note(ui, "Hold and move the left mouse button to magnify. Full-window zoom follows the pointer across the image viewing area; release to restore the view.");
+                h.section(ui, "While an image loads");
                 h.check(
                     ui,
                     &mut s.jpeg_preview,
                     "Show a quick preview while the image loads",
                 );
-                ui.label("Uses cached thumbnails, embedded JPEG previews or reduced JPEG decoding. Magnification waits for full detail.");
+                h.note(ui, "Uses cached thumbnails, embedded JPEG previews or reduced JPEG decoding. Magnification waits for full detail.");
                 h.check(
                     ui,
                     &mut s.keep_previous_image,
@@ -9448,7 +9570,7 @@ impl Viewer {
                     &mut s.fullscreen_image_only,
                     "Fullscreen shows only the image (no top bar, image number or notices)",
                 );
-                settings_section(ui, "Title");
+                h.section(ui, "Title");
                 h.check(
                     ui,
                     &mut s.image_title_folder,
@@ -9467,10 +9589,10 @@ impl Viewer {
                 );
             }
             1 => {
-                settings_section(ui, "Order");
+                h.section(ui, "Order");
                 order_controls(ui, h, &mut s.order, "browse_order");
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Sort images by");
+                    h.note(ui, "Sort images by");
                     for k in crate::sorting::SortKey::ALL {
                         if h.button(ui, k.label(), s.sort_key == k, true, false) {
                             s.sort_key = k;
@@ -9480,31 +9602,32 @@ impl Viewer {
                         s.sort_descending = !s.sort_descending;
                     }
                 });
-                settings_section(ui, "Mouse wheel");
+                h.section(ui, "Mouse wheel");
                 h.check(ui, &mut s.wheel_up_next, "Scroll up for next image");
                 h.check(
                     ui,
                     &mut s.random_wheel_both,
                     "Random / Shuffle order: scrolling either way shows a new image (no history)",
                 );
-                ui.label(
+                h.note(
+                    ui,
                     "On: scroll up for Next, down for Previous. Off reverses the wheel direction.",
                 );
-                settings_section(ui, "History");
+                h.section(ui, "History");
                 h.slider(
                     ui,
                     &mut s.history_limit,
                     2..=100_000,
                     "History length (visits)",
                 );
-                ui.label(format!("Recent trail: {} / {} visits. Includes the current image and repeated visits. Distant visits are forgotten at the limit.",self.nav.history_len(),self.nav.history_limit()));
-                ui.label("Changing the browsing order starts a new trail at the current image. Within one order, Previous follows the recorded trail.");
+                h.note(ui, format!("Recent trail: {} / {} visits. Includes the current image and repeated visits. Distant visits are forgotten at the limit.",self.nav.history_len(),self.nav.history_limit()));
+                h.note(ui, "Changing the browsing order starts a new trail at the current image. Within one order, Previous follows the recorded trail.");
                 h.check(
                     ui,
                     &mut s.keep_selected_tags,
                     "Keep selected tags when the image changes (with tag lock)",
                 );
-                settings_section(ui, "Round notice");
+                h.section(ui, "Round notice");
                 h.check(
                     ui,
                     &mut s.round_notice,
@@ -9512,7 +9635,7 @@ impl Viewer {
                 );
                 ui.add_enabled_ui(s.round_notice, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("As");
+                        h.note(ui, "As");
                         if h.button(ui, "a notice", !s.round_notice_dialog, true, false) {
                             s.round_notice_dialog = false;
                         }
@@ -9553,7 +9676,7 @@ impl Viewer {
                         });
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Notice place");
+                        h.note(ui, "Notice place");
                         for (value, label) in
                             [("top", "Top"), ("center", "Centre"), ("bottom", "Bottom")]
                         {
@@ -9561,7 +9684,7 @@ impl Viewer {
                                 s.round_notice_place = value.to_owned();
                             }
                         }
-                        ui.label("Colour");
+                        h.note(ui, "Colour");
                         let c = s.round_notice_color;
                         let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                         if ui.color_edit_button_srgba(&mut color).changed() {
@@ -9569,8 +9692,8 @@ impl Viewer {
                         }
                     });
                 });
-                ui.label(RichText::new("In the image view: once every image of the list has been shown, a new round begins. The toolbar's round button (in the group by default) turns this on and off.").color(MUTED));
-                settings_section(ui, "Window edges");
+                h.note(ui, RichText::new("In the image view: once every image of the list has been shown, a new round begins. The toolbar's round button (in the group by default) turns this on and off.").color(MUTED));
+                h.section(ui, "Window edges");
                 h.check(
                     ui,
                     &mut s.edges,
@@ -9590,8 +9713,8 @@ impl Viewer {
                 );
                 h.slider(ui, &mut s.top_px, 2.0..=600.0, "Top activation strip (px)");
                 h.slider(ui, &mut s.top_ms, 0..=6000, "Top activation delay (ms)");
-                ui.label(RichText::new("Strips cover at most 45 % of the window. With a 0 ms top delay and no confirmation, touching the top edge moves the image to the Recycle Bin at once.").color(MUTED));
-                settings_section(ui, "Slideshow");
+                h.note(ui, RichText::new("Strips cover at most 45 % of the window. With a 0 ms top delay and no confirmation, touching the top edge moves the image to the Recycle Bin at once.").color(MUTED));
+                h.section(ui, "Slideshow");
                 h.slider(ui, &mut s.slideshow_secs, 0.5..=120.0, "Seconds per image");
                 order_controls(ui, h, &mut s.slideshow_order, "slide_order");
                 h.slider(
@@ -9618,10 +9741,13 @@ impl Viewer {
                     0..=4000,
                     "Slideshow pause / resume delay (ms)",
                 );
-                ui.label("During a slideshow the top edge pauses / resumes; it never deletes.");
+                h.note(
+                    ui,
+                    "During a slideshow the top edge pauses / resumes; it never deletes.",
+                );
             }
             2 => {
-                settings_section(ui, "Pages");
+                h.section(ui, "Pages");
                 h.slider(
                     ui,
                     &mut s.thumbnail_count,
@@ -9633,7 +9759,7 @@ impl Viewer {
                     &mut s.grid_round_full,
                     "Round page size up to fill the grid",
                 );
-                ui.label("When a page size leaves empty cells, it is rounded up to the next full grid, if the folder has enough images. − / + then step between full sizes.");
+                h.note(ui, "When a page size leaves empty cells, it is rounded up to the next full grid, if the folder has enough images. − / + then step between full sizes.");
                 h.check(
                     ui,
                     &mut s.grid_page_arrows,
@@ -9669,10 +9795,10 @@ impl Viewer {
                     &mut s.confirm_preset_remove,
                     "Confirm before removing a page-size button",
                 );
-                settings_section(ui, "Opening");
+                h.section(ui, "Opening");
                 ui.horizontal_wrapped(|ui| {
                     use crate::model::GridStartMode as M;
-                    ui.label("Grid opens in");
+                    h.note(ui, "Grid opens in");
                     for (mode, label) in [
                         (M::Selection, "Selection mode"),
                         (M::Normal, "Normal mode"),
@@ -9683,9 +9809,9 @@ impl Viewer {
                         }
                     }
                 });
-                settings_section(ui, "Controls");
+                h.section(ui, "Controls");
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Grid controls");
+                    h.note(ui, "Grid controls");
                     if h.button(ui, "Text buttons", !s.grid_bar_icons, true, false) {
                         s.grid_bar_icons = false;
                     }
@@ -9706,10 +9832,10 @@ impl Viewer {
                     &mut s.grid_bar_fixed_width,
                     "Grid controls keep their width (page number and counts take the room of their widest value)",
                 );
-                ui.label(RichText::new("Controls that do not fit in the window go behind » at the right end, which shows them in a bar above.").color(MUTED));
+                h.note(ui, RichText::new("Controls that do not fit in the window go behind » at the right end, which shows them in a bar above.").color(MUTED));
                 ui.add_enabled_ui(s.grid_bar_icons, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Icon bar");
+                        h.note(ui, "Icon bar");
                         if h.button(ui, "Always shown", s.grid_bar_fixed, true, false) {
                             s.grid_bar_fixed = true;
                         }
@@ -9734,7 +9860,7 @@ impl Viewer {
                         &mut s.grid_hide_toolbar,
                         "Hide the floating toolbar on the grid page (otherwise it is stacked above the icon bar)",
                     );
-                    ui.label(RichText::new("Always shown: the grid leaves room for the bar. Opening at the bottom edge: the lock icon on the bar (or the grid lock in Display settings) keeps it open. Without the toolbar the bar also has Filter, Open folder and the floating trash button.").color(MUTED));
+                    h.note(ui, RichText::new("Always shown: the grid leaves room for the bar. Opening at the bottom edge: the lock icon on the bar (or the grid lock in Display settings) keeps it open. Without the toolbar the bar also has Filter, Open folder and the floating trash button.").color(MUTED));
                 });
                 // Icon colours, and box and text colours of the text buttons.
                 for (title, which) in [
@@ -9763,7 +9889,7 @@ impl Viewer {
                         }
                     });
                 }
-                settings_section(ui, "Under the images and the title");
+                h.section(ui, "Under the images and the title");
                 h.check(
                     ui,
                     &mut s.grid_keep_tag_mode,
@@ -9782,7 +9908,7 @@ impl Viewer {
                     );
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Grid page title");
+                    h.note(ui, "Grid page title");
                     if h.button(ui, "first – last image", s.grid_caption_range, true, false) {
                         s.grid_caption_range = true;
                     }
@@ -9800,7 +9926,7 @@ impl Viewer {
                     &mut s.grid_caption_count,
                     "Grid page title: the number of images at the end",
                 );
-                settings_section(ui, "Hover preview");
+                h.section(ui, "Hover preview");
                 h.check(
                     ui,
                     &mut s.grid_hover_preview,
@@ -9897,7 +10023,7 @@ impl Viewer {
                 );
                 ui.add_enabled_ui(s.preview_close_move_px > 0., |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("In this direction");
+                        h.note(ui, "In this direction");
                         for (value, label) in [
                             ("any", "Any"),
                             ("up", "Up"),
@@ -9911,14 +10037,18 @@ impl Viewer {
                         }
                     });
                 });
-                ui.label("The preview also closes with the gesture and with Escape.");
-                settings_section(ui, "Selection");
+                h.note(
+                    ui,
+                    "The preview also closes with the gesture and with Escape.",
+                );
+                h.section(ui, "Selection");
                 h.check(
                     ui,
                     &mut s.normal_keeps_selection,
                     "Keep the trash / tag selection when switching to Normal mode",
                 );
-                ui.label(
+                h.note(
+                    ui,
                     "When off, Normal mode clears the selection; Restore selection brings it back.",
                 );
                 h.check(
@@ -9949,7 +10079,7 @@ impl Viewer {
                     60.0..=800.0,
                     "Message box height (px)",
                 );
-                settings_section(ui, "Big image from the grid");
+                h.section(ui, "Big image from the grid");
                 h.check(
                     ui,
                     &mut s.grid_viewer_browse,
@@ -9961,7 +10091,8 @@ impl Viewer {
                     100..=1500,
                     "Big image: hold longer than this for the magnifier (ms)",
                 );
-                ui.label(
+                h.note(
+                    ui,
                     "In the big image opened from the grid, a shorter click returns to the grid.",
                 );
                 h.check(
@@ -9976,7 +10107,7 @@ impl Viewer {
                 );
             }
             3 => {
-                settings_section(ui, "Toolbar");
+                h.section(ui, "Toolbar");
                 h.slider(ui, &mut s.bar_width, 340.0..=1600.0, "Toolbar width (px)");
                 s.initialize_tag_width();
                 h.slider(
@@ -10026,7 +10157,7 @@ impl Viewer {
                     &mut s.bar_lock_universal,
                     "Universal lock: one lock for the image view and the grid",
                 );
-                ui.label(RichText::new("A locked toolbar stays open: the bottom edge and Escape do not close it. The lock icon at its right end switches the lock of the current view. The image view and the grid keep their own distance from the bottom; the toolbar always stays on screen.").color(MUTED));
+                h.note(ui, RichText::new("A locked toolbar stays open: the bottom edge and Escape do not close it. The lock icon at its right end switches the lock of the current view. The image view and the grid keep their own distance from the bottom; the toolbar always stays on screen.").color(MUTED));
                 h.slider(
                     ui,
                     &mut s.bar_offset,
@@ -10052,7 +10183,7 @@ impl Viewer {
                     "Toolbar activation delay (ms)",
                 );
                 bar_buttons_editor(ui, h, s, &mut self.bar_buttons_tab);
-                settings_section(ui, "Hover activation");
+                h.section(ui, "Hover activation");
                 h.check(
                     ui,
                     &mut s.hover,
@@ -10091,8 +10222,8 @@ impl Viewer {
                     &mut s.hover_ring,
                     "Show the progress ring while hovering a control",
                 );
-                ui.label(RichText::new("The progress ring shows when a control will activate. Leave a control or edge to re-arm it.").color(MUTED));
-                settings_section(ui, "Floating trash button");
+                h.note(ui, RichText::new("The progress ring shows when a control will activate. Leave a control or edge to re-arm it.").color(MUTED));
+                h.section(ui, "Floating trash button");
                 h.slider(ui, &mut s.delete_size, 48.0..=260.0, "Diameter (px)");
                 color_controls(ui, h, &mut s.delete_color, "Button color");
                 h.slider(
@@ -10125,9 +10256,9 @@ impl Viewer {
                     s.delete_pos = None;
                     self.delete_area_revision += 1;
                 }
-                settings_section(ui, "Floating Move button");
+                h.section(ui, "Floating Move button");
                 ui.horizontal(|ui| {
-                    ui.label("Button colour");
+                    h.note(ui, "Button colour");
                     let c = s.move_color;
                     let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                     if ui.color_edit_button_srgba(&mut color).changed() {
@@ -10136,7 +10267,7 @@ impl Viewer {
                 });
             }
             4 => {
-                settings_section(ui, "Recycle Bin");
+                h.section(ui, "Recycle Bin");
                 h.check(
                     ui,
                     &mut s.confirm_delete,
@@ -10152,10 +10283,10 @@ impl Viewer {
                     &mut s.forget_deletion_on_close,
                     "Forget the last deletion when NoirView closes",
                 );
-                ui.label(RichText::new("Restore deleted (toolbar, grid bar, right-click menu, Ctrl+Z) moves the last deleted images back from the Recycle Bin and shows the first one. Off: it also works after a restart.").color(MUTED));
-                settings_section(ui, "Moving");
-                ui.label("Move destination");
-                ui.label(s.destination.display().to_string());
+                h.note(ui, RichText::new("Restore deleted (toolbar, grid bar, right-click menu, Ctrl+Z) moves the last deleted images back from the Recycle Bin and shows the first one. Off: it also works after a restart.").color(MUTED));
+                h.section(ui, "Moving");
+                h.note(ui, "Move destination");
+                h.note(ui, s.destination.display().to_string());
                 if h.button(
                     ui,
                     "Choose destination",
@@ -10182,8 +10313,8 @@ impl Viewer {
                     "Sequence names fill free numbers in the destination first",
                 );
                 let example = format!("{:0w$}", 1, w = s.move_digits.clamp(1, 8));
-                ui.label(RichText::new(format!("Without keeping the names they become {example}.ext and on (the format and extension stay intact), after the highest such number already in the destination; past the last number of that width it goes on with one digit more. Clashing original names get \" (2)\" and so on.")).color(MUTED));
-                ui.label("The move includes all images in the opened folder scope, even with an active filter.");
+                h.note(ui, RichText::new(format!("Without keeping the names they become {example}.ext and on (the format and extension stay intact), after the highest such number already in the destination; past the last number of that width it goes on with one digit more. Clashing original names get \" (2)\" and so on.")).color(MUTED));
+                h.note(ui, "The move includes all images in the opened folder scope, even with an active filter.");
                 if h.button(
                     ui,
                     "Recover interrupted moves…",
@@ -10193,10 +10324,10 @@ impl Viewer {
                 ) {
                     actions.push("recover");
                 }
-                settings_section(ui, "Marking and the Move grid");
-                ui.label(RichText::new("Single image view. Its toolbar button: a click shows the floating Move button (moves the image shown); holding starts marking images to move, and while marking a click opens the Move grid of the marked images (holding stops marking). The Move grid works like the grid (hover preview, tags, selections, Trash, page size) with Move, Destination (hold: favorites), Keep names and Cancel on its icon bar; a click on a thumbnail shows it big.").color(MUTED));
+                h.section(ui, "Marking and the Move grid");
+                h.note(ui, RichText::new("Single image view. Its toolbar button: a click shows the floating Move button (moves the image shown); holding starts marking images to move, and while marking a click opens the Move grid of the marked images (holding stops marking). The Move grid works like the grid (hover preview, tags, selections, Trash, page size) with Move, Destination (hold: favorites), Keep names and Cancel on its icon bar; a click on a thumbnail shows it big.").color(MUTED));
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Move grid pages");
+                    h.note(ui, "Move grid pages");
                     if h.button(ui, "Pages", !s.move_grid_all, true, false) {
                         s.move_grid_all = false;
                     }
@@ -10228,7 +10359,7 @@ impl Viewer {
                         "One row at a time (instead of a page)",
                     );
                 });
-                ui.label(RichText::new("All on one page: the page goes on downwards; the wheel and the page arrows bring the next page (or row) up instead of turning the page.").color(MUTED));
+                h.note(ui, RichText::new("All on one page: the page goes on downwards; the wheel and the page arrows bring the next page (or row) up instead of turning the page.").color(MUTED));
                 h.check(
                     ui,
                     &mut s.move_grid_browse,
@@ -10240,7 +10371,7 @@ impl Viewer {
                     "Show the \"✔ MOVE\" mark on the Move grid's thumbnails",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("× on the thumbnails: colour");
+                    h.note(ui, "× on the thumbnails: colour");
                     let c = s.move_x_color;
                     let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                     if ui.color_edit_button_srgba(&mut color).changed() {
@@ -10262,7 +10393,7 @@ impl Viewer {
                 );
                 ui.add_enabled_ui(s.move_grid_frame, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Frame colour");
+                        h.note(ui, "Frame colour");
                         let c = s.move_grid_frame_color;
                         let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                         if ui.color_edit_button_srgba(&mut color).changed() {
@@ -10291,7 +10422,7 @@ impl Viewer {
                 );
             }
             5 => {
-                settings_section(ui, "Folders");
+                h.section(ui, "Folders");
                 h.check(
                     ui,
                     &mut s.recursive,
@@ -10300,14 +10431,14 @@ impl Viewer {
                 if self.settings_scroll.take() == Some("favorites") {
                     ui.scroll_to_cursor(Some(egui::Align::TOP));
                 }
-                settings_section(ui, "Favorite folders");
-                ui.label(RichText::new("Hold Open folder (toolbar or grid) to open one of these; the list can also add or remove the open folder.").color(MUTED));
+                h.section(ui, "Favorite folders");
+                h.note(ui, RichText::new("Hold Open folder (toolbar or grid) to open one of these; the list can also add or remove the open folder.").color(MUTED));
                 h.check(
                     ui,
                     &mut s.remember_favorite_places,
                     "Favorite folders open where browsing left them",
                 );
-                ui.label(RichText::new("Kept for each profile (and for no profile) and across restarts, with the browsing order: Shuffle goes on with the images not yet shown, new ones included. Go to image 1 starts over; deleted images are skipped.").color(MUTED));
+                h.note(ui, RichText::new("Kept for each profile (and for no profile) and across restarts, with the browsing order: Shuffle goes on with the images not yet shown, new ones included. Go to image 1 starts over; deleted images are skipped.").color(MUTED));
                 let mut remove = None;
                 let mut swap = None;
                 let count = s.favorite_folders.len();
@@ -10376,9 +10507,12 @@ impl Viewer {
                         }
                     }
                 });
-                ui.label(RichText::new("An empty name shows the folder's own name.").color(MUTED));
+                h.note(
+                    ui,
+                    RichText::new("An empty name shows the folder's own name.").color(MUTED),
+                );
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("In the list as");
+                    h.note(ui, "In the list as");
                     for (value, label) in [
                         ("buttons", "buttons"),
                         ("text", "/name"),
@@ -10389,38 +10523,45 @@ impl Viewer {
                         }
                     }
                 });
-                settings_section(ui, "Keywords and tags");
-                ui.label("Keywords are cached in a local SQLite index. Only new or changed images are read again; the open folder is watched for changes.");
+                h.section(ui, "Keywords and tags");
+                h.note(ui, "Keywords are cached in a local SQLite index. Only new or changed images are read again; the open folder is watched for changes.");
                 if let Some(store) = &self.store {
                     if let Some(parent) = store.path.parent() {
-                        ui.label(format!(
-                            "Keyword index: {}",
-                            parent.join("keyword-index.sqlite3").display()
-                        ));
+                        h.note(
+                            ui,
+                            format!(
+                                "Keyword index: {}",
+                                parent.join("keyword-index.sqlite3").display()
+                            ),
+                        );
                     }
                 }
                 if let Some(progress) = self.last_index {
-                    ui.label(format!(
-                        "Last index: {} checked · {} cached · {} read · {:.2}s",
-                        progress.total,
-                        progress.cached,
-                        progress.read,
-                        progress.elapsed.as_secs_f32()
-                    ));
+                    h.note(
+                        ui,
+                        format!(
+                            "Last index: {} checked · {} cached · {} read · {:.2}s",
+                            progress.total,
+                            progress.cached,
+                            progress.read,
+                            progress.elapsed.as_secs_f32()
+                        ),
+                    );
                 }
                 if h.button(ui, "Rebuild keyword index…", false, !self.busy, false) {
                     actions.push("reindex");
                 }
 
-                ui.label("Tags shows My tags by default. Additional includes image keywords with yellow borders. Use + to create your own tags.");
-                ui.label("Remove tags hides words from the palette; existing image keywords remain unchanged.");
-                ui.label(
+                h.note(ui, "Tags shows My tags by default. Additional includes image keywords with yellow borders. Use + to create your own tags.");
+                h.note(ui, "Remove tags hides words from the palette; existing image keywords remain unchanged.");
+                h.note(
+                    ui,
                     "JPEG: XMP + Windows Tags. PNG/WebP: embedded XMP. Other formats: image.ext.xmp sidecars.",
                 );
                 if h.button(ui, "Rescan current folder…", false, !self.busy, false) {
                     actions.push("rescan");
                 }
-                settings_section(ui, "Watched folders");
+                h.section(ui, "Watched folders");
                 h.check(
                     ui,
                     &mut s.watch_folders,
@@ -10465,7 +10606,7 @@ impl Viewer {
                     &mut s.watch_when_unfocused,
                     "Keep working when NoirView is not the active window",
                 );
-                ui.label("While NoirView is open, it watches the folders itself; otherwise it pauses while you use it.");
+                h.note(ui, "While NoirView is open, it watches the folders itself; otherwise it pauses while you use it.");
                 h.check(
                     ui,
                     &mut s.watch_background,
@@ -10476,18 +10617,18 @@ impl Viewer {
                     },
                 );
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Pace");
+                    h.note(ui, "Pace");
                     for pace in crate::model::WatchPace::ALL {
                         if h.button(ui, pace.label(), s.watch_pace == pace, true, false) {
                             s.watch_pace = pace;
                         }
                     }
                 });
-                ui.label("Gentle rests between images (easiest on a hard disk), Balanced rests less, Fast does not rest.");
+                h.note(ui, "Gentle rests between images (easiest on a hard disk), Balanced rests less, Fast does not rest.");
                 });
                 if let Some(handle) = &self.watch.handle {
                     let status = handle.status();
-                    ui.label(format!("Watcher (in NoirView): {}", status.summary()));
+                    h.note(ui, format!("Watcher (in NoirView): {}", status.summary()));
                     if status.cache_full {
                         ui.colored_label(
                             RED,
@@ -10503,28 +10644,38 @@ impl Viewer {
                         "Another open NoirView window is watching folders; close it to watch here.",
                     );
                 } else if s.watch_folders && !s.watched_folders.is_empty() {
-                    ui.label(if self.watch.lock.is_none() {
-                        "Watcher: waiting for the background watcher to hand over…"
-                    } else {
-                        "Watcher: starting…"
-                    });
+                    h.note(
+                        ui,
+                        if self.watch.lock.is_none() {
+                            "Watcher: waiting for the background watcher to hand over…"
+                        } else {
+                            "Watcher: starting…"
+                        },
+                    );
                 }
                 if let Some(last) = &self.watch.background {
-                    ui.label(format!(
-                        "Last background run (version {}): {}",
-                        last.version,
-                        last.summary()
-                    ));
+                    h.note(
+                        ui,
+                        format!(
+                            "Last background run (version {}): {}",
+                            last.version,
+                            last.summary()
+                        ),
+                    );
                 }
                 if let Some(error) = &self.watch.error {
                     ui.colored_label(RED, error);
                 }
-                ui.label(
+                h.note(
+                    ui,
                     "Keywords are shared with the viewer when you open the same folder with the same subfolder setting; thumbnails are shared always.",
                 );
                 ui.separator();
-                ui.label(RichText::new("Fast change detection (NTFS change journal)").strong());
-                ui.label("An optional Windows service that reads the NTFS change journal for the watcher. It runs as the system account because only administrators may read the journal, opens no images, and answers only you. Installing and removing it each ask for administrator rights once.");
+                h.note(
+                    ui,
+                    RichText::new("Fast change detection (NTFS change journal)").strong(),
+                );
+                h.note(ui, "An optional Windows service that reads the NTFS change journal for the watcher. It runs as the system account because only administrators may read the journal, opens no images, and answers only you. Installing and removing it each ask for administrator rights once.");
                 if self
                     .usn
                     .checked
@@ -10541,24 +10692,27 @@ impl Viewer {
                     .version
                     .as_deref()
                     .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
-                ui.label(match (&self.usn.state, &self.usn.version) {
-                    (None, _) => "Service: checking…".to_string(),
-                    (Some(crate::usn::State::Unsupported), _) => {
-                        "Service: available on Windows only".to_string()
-                    }
-                    (Some(crate::usn::State::NotInstalled), _) => {
-                        "Service: not installed (the watcher lists folders instead)".to_string()
-                    }
-                    (Some(crate::usn::State::Running), Some(v)) => {
-                        format!("Service: running (version {v})")
-                    }
-                    (Some(crate::usn::State::Running), None) => {
-                        "Service: running but not answering".to_string()
-                    }
-                    (Some(crate::usn::State::Stopped), _) => {
-                        "Service: installed but not running".to_string()
-                    }
-                });
+                h.note(
+                    ui,
+                    match (&self.usn.state, &self.usn.version) {
+                        (None, _) => "Service: checking…".to_string(),
+                        (Some(crate::usn::State::Unsupported), _) => {
+                            "Service: available on Windows only".to_string()
+                        }
+                        (Some(crate::usn::State::NotInstalled), _) => {
+                            "Service: not installed (the watcher lists folders instead)".to_string()
+                        }
+                        (Some(crate::usn::State::Running), Some(v)) => {
+                            format!("Service: running (version {v})")
+                        }
+                        (Some(crate::usn::State::Running), None) => {
+                            "Service: running but not answering".to_string()
+                        }
+                        (Some(crate::usn::State::Stopped), _) => {
+                            "Service: installed but not running".to_string()
+                        }
+                    },
+                );
                 let idle = !self.usn.busy && self.usn.state != Some(crate::usn::State::Unsupported);
                 ui.horizontal(|ui| {
                     let label = if outdated {
@@ -10588,18 +10742,18 @@ impl Viewer {
                     );
                 }
                 if let Some(message) = &self.usn.message {
-                    ui.label(message);
+                    h.note(ui, message);
                 }
                 h.check(
                     ui,
                     &mut s.watch_use_journal,
                     "Use the change journal when the service is installed",
                 );
-                ui.label("With the service, the watcher reads what changed since the last check (at start and after large copies) instead of listing folders. Live watching is the same either way.");
+                h.note(ui, "With the service, the watcher reads what changed since the last check (at start and after large copies) instead of listing folders. Live watching is the same either way.");
             }
             6 => {
-                settings_section(ui, "Image loading");
-                ui.label("Image loading");
+                h.section(ui, "Image loading");
+                h.note(ui, "Image loading");
                 ui.horizontal_wrapped(|ui| {
                     for mode in [
                         crate::model::LoadingMode::Standard,
@@ -10610,7 +10764,7 @@ impl Viewer {
                         }
                     }
                 });
-                ui.label("Standard loads what is on screen and the neighbouring pages. Aggressive also caches thumbnails for the whole open folder in the background (one low-priority worker) and keeps a screen-sized first view of large images you have opened.");
+                h.note(ui, "Standard loads what is on screen and the neighbouring pages. Aggressive also caches thumbnails for the whole open folder in the background (one low-priority worker) and keeps a screen-sized first view of large images you have opened.");
                 let aggressive = s.loading_mode == crate::model::LoadingMode::Aggressive;
                 ui.add_enabled_ui(aggressive, |ui| {
                     h.check(
@@ -10636,10 +10790,10 @@ impl Viewer {
                         "Keep a first view for images at least this long (px, longer side)",
                     );
                 });
-                ui.label("Without these options the background pass pauses 2 s after any input and while another program is in front. It always pauses during keyword indexing. The first view is a slightly compressed 2560 px copy shown until the exact image is ready; zero disables it. When one was shown, a note at the bottom left of the image reports its timing for a few seconds.");
+                h.note(ui, "Without these options the background pass pauses 2 s after any input and while another program is in front. It always pauses during keyword indexing. The first view is a slightly compressed 2560 px copy shown until the exact image is ready; zero disables it. When one was shown, a note at the bottom left of the image reports its timing for a few seconds.");
                 let proxies = self.images.proxy_cache.stats();
                 if aggressive {
-                    ui.label(format!(
+                    h.note(ui, format!(
                         "First views: {} hits / {} saved this session ({} not saved) · {} stored ({} MiB)",
                         proxies.hits,
                         proxies.writes,
@@ -10648,63 +10802,76 @@ impl Viewer {
                         proxies.bytes / (1024 * 1024)
                     ));
                     if let Some(summary) = self.view_timer.as_ref().and_then(|t| t.summary()) {
-                        ui.label(format!("Last opened image: {summary}"));
+                        h.note(ui, format!("Last opened image: {summary}"));
                     }
                     if !s.jpeg_preview {
-                        ui.label(RichText::new("First views are not shown: Settings → Display → \"Show a quick preview while the image loads\" is off.").color(RED));
+                        h.note(ui, RichText::new("First views are not shown: Settings → Display → \"Show a quick preview while the image loads\" is off.").color(RED));
                     }
                 }
                 h.slider(ui, &mut s.prefetch_ahead, 0..=32, "Prefetch ahead");
                 h.slider(ui, &mut s.prefetch_behind, 0..=32, "Prefetch behind");
-                ui.label("Maximum images in and against the browsing direction. Memory limits may reduce these counts. Zero disables that side.");
-                settings_section(ui, "Thumbnail cache");
+                h.note(ui, "Maximum images in and against the browsing direction. Memory limits may reduce these counts. Zero disables that side.");
+                h.section(ui, "Thumbnail cache");
                 h.slider(
                     ui,
                     &mut s.thumbnail_cache_mb,
                     0..=4096,
                     "Thumbnail disk cache (MiB)",
                 );
-                ui.label("Speeds up reopening thumbnails. Zero disables disk caching; full image detail is preserved.");
+                h.note(ui, "Speeds up reopening thumbnails. Zero disables disk caching; full image detail is preserved.");
                 if let Some(p) = self.images.pregen_progress() {
-                    ui.label(if p.full {
-                        format!(
-                            "Pre-generation stopped: cache nearly full ({} / {} images)",
-                            p.done, p.total
-                        )
-                    } else {
-                        format!(
-                            "Pre-generated: {} / {} images ({} new this pass)",
-                            p.done, p.total, p.generated
-                        )
-                    });
+                    h.note(
+                        ui,
+                        if p.full {
+                            format!(
+                                "Pre-generation stopped: cache nearly full ({} / {} images)",
+                                p.done, p.total
+                            )
+                        } else {
+                            format!(
+                                "Pre-generated: {} / {} images ({} new this pass)",
+                                p.done, p.total, p.generated
+                            )
+                        },
+                    );
                 }
                 let cache = self.images.disk_cache.stats();
-                ui.label(format!(
-                    "Thumbnail cache: {} hits / {} saved this session · {} stored ({} MiB)",
-                    cache.hits,
-                    cache.writes,
-                    cache.entries,
-                    cache.bytes / (1024 * 1024)
-                ));
-                ui.label(if cache.pending == 0 {
-                    "Thumbnail cache: ready".to_owned()
-                } else {
-                    format!("Thumbnail cache: saving {} image(s)…", cache.pending)
-                });
+                h.note(
+                    ui,
+                    format!(
+                        "Thumbnail cache: {} hits / {} saved this session · {} stored ({} MiB)",
+                        cache.hits,
+                        cache.writes,
+                        cache.entries,
+                        cache.bytes / (1024 * 1024)
+                    ),
+                );
+                h.note(
+                    ui,
+                    if cache.pending == 0 {
+                        "Thumbnail cache: ready".to_owned()
+                    } else {
+                        format!("Thumbnail cache: saving {} image(s)…", cache.pending)
+                    },
+                );
                 if cache.skipped > 0 || cache.errors > 0 {
-                    ui.label(format!(
+                    h.note(ui, format!(
                         "Cache: {} older writes skipped under memory pressure / {} write errors this session",
                         cache.skipped, cache.errors
                     ));
                 }
-                ui.label(if s.thumbnail_cache_dir.as_os_str().is_empty() {
-                    "Thumbnail cache folder: default (inside the NoirView data folder)".to_owned()
-                } else {
-                    format!(
-                        "Thumbnail cache folder: {}",
-                        s.thumbnail_cache_dir.join(CACHE_FOLDER).display()
-                    )
-                });
+                h.note(
+                    ui,
+                    if s.thumbnail_cache_dir.as_os_str().is_empty() {
+                        "Thumbnail cache folder: default (inside the NoirView data folder)"
+                            .to_owned()
+                    } else {
+                        format!(
+                            "Thumbnail cache folder: {}",
+                            s.thumbnail_cache_dir.join(CACHE_FOLDER).display()
+                        )
+                    },
+                );
                 ui.horizontal(|ui| {
                     if h.button(ui, "Choose cache folder", false, true, false) {
                         actions.push("cache_dir");
@@ -10714,9 +10881,12 @@ impl Viewer {
                     }
                 });
                 if s.thumbnail_cache_dir != self.cache_dir_in_use {
-                    ui.label("The new cache folder is used after restarting NoirView.");
+                    h.note(
+                        ui,
+                        "The new cache folder is used after restarting NoirView.",
+                    );
                 }
-                ui.label("A folder outside the program folder keeps thumbnails when NoirView is replaced by a newer version.");
+                h.note(ui, "A folder outside the program folder keeps thumbnails when NoirView is replaced by a newer version.");
                 if h.button(
                     ui,
                     "Clear thumbnail cache (disk and memory)",
@@ -10726,22 +10896,25 @@ impl Viewer {
                 ) {
                     actions.push("clear_thumbnails");
                 }
-                settings_section(ui, "Memory");
+                h.section(ui, "Memory");
                 h.slider(
                     ui,
                     &mut s.cache_mb,
                     64..=4096,
                     "Texture / decoder memory budget (MiB)",
                 );
-                ui.label(format!("Cached textures: {} MiB", self.images.memory_mb()));
-                settings_section(ui, "Display");
+                h.note(
+                    ui,
+                    format!("Cached textures: {} MiB", self.images.memory_mb()),
+                );
+                h.section(ui, "Display");
                 h.check(
                     ui,
                     &mut s.low_latency_display,
                     "Low-latency display: the graphics driver queues one frame instead of two (after a restart)",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Graphics backend (after a restart)");
+                    h.note(ui, "Graphics backend (after a restart)");
                     for (value, label) in [
                         ("", "Automatic"),
                         ("dx12", "DirectX 12"),
@@ -10753,17 +10926,17 @@ impl Viewer {
                         }
                     }
                 });
-                ui.label(RichText::new(format!("In use: {}. Automatic is OpenGL on Windows (Vulkan / DirectX 12 if OpenGL does not start). If a backend does not start, the next start uses the automatic choice.", self.gpu)).color(MUTED));
-                ui.label(RichText::new("Vulkan with NVIDIA: if a strip stays at the window's bottom and right after resizing and clicks land above, set NVIDIA Control Panel → Manage 3D settings → Vulkan/OpenGL present method → Prefer native, or use OpenGL.").color(MUTED));
+                h.note(ui, RichText::new(format!("In use: {}. Automatic is OpenGL on Windows (Vulkan / DirectX 12 if OpenGL does not start). If a backend does not start, the next start uses the automatic choice.", self.gpu)).color(MUTED));
+                h.note(ui, RichText::new("Vulkan with NVIDIA: if a strip stays at the window's bottom and right after resizing and clicks land above, set NVIDIA Control Panel → Manage 3D settings → Vulkan/OpenGL present method → Prefer native, or use OpenGL.").color(MUTED));
                 h.check(
                     ui,
                     &mut s.remember_window,
                     "Remember the window's size and position (after a restart)",
                 );
-                ui.label(RichText::new("Off: NoirView opens at its default size each time. Try this if part of the window stays transparent or clicks land above where you click.").color(MUTED));
+                h.note(ui, RichText::new("Off: NoirView opens at its default size each time. Try this if part of the window stays transparent or clicks land above where you click.").color(MUTED));
             }
             7 => {
-                ui.label("MP3 · WAV · FLAC · Ogg Vorbis");
+                h.note(ui, "MP3 · WAV · FLAC · Ogg Vorbis");
                 ui.horizontal(|ui| {
                     if h.button(ui, "Add tracks", false, true, false) {
                         actions.push("tracks");
@@ -10781,8 +10954,11 @@ impl Viewer {
                             if h.button(ui, "×", false, true, false) {
                                 remove = Some(i);
                             }
-                            ui.label(p.file_name().unwrap_or_default().to_string_lossy());
-                            ui.label(RichText::new(p.display().to_string()).small().color(MUTED));
+                            h.note(ui, p.file_name().unwrap_or_default().to_string_lossy());
+                            h.note(
+                                ui,
+                                RichText::new(p.display().to_string()).small().color(MUTED),
+                            );
                         });
                     });
                 }
@@ -10790,12 +10966,12 @@ impl Viewer {
                     s.music.remove(i);
                 }
                 if let Some(track) = self.music.track() {
-                    ui.label(format!("Current: {track}"));
+                    h.note(ui, format!("Current: {track}"));
                 }
             }
             8 => {
-                ui.label(&self.gpu);
-                ui.label(RichText::new("Images are rendered by wgpu. Decoding, prefetching and image processing run off the UI thread.").color(MUTED));
+                h.note(ui, &self.gpu);
+                h.note(ui, RichText::new("Images are rendered by wgpu. Decoding, prefetching and image processing run off the UI thread.").color(MUTED));
                 for mode in [
                     Upscale::Linear,
                     Upscale::Nearest,
@@ -10820,13 +10996,16 @@ impl Viewer {
                     0.0..=1.0,
                     "Adaptive sharpening strength",
                 );
-                ui.label("ONNX / ESRGAN model");
-                ui.label(s.model_path.display().to_string());
+                h.note(ui, "ONNX / ESRGAN model");
+                h.note(ui, s.model_path.display().to_string());
                 if h.button(ui, "Choose ONNX model", false, true, false) {
                     actions.push("model");
                 }
-                ui.label("ONNX Runtime library (1.22; DirectML package on Windows)");
-                ui.label(s.ort_library.display().to_string());
+                h.note(
+                    ui,
+                    "ONNX Runtime library (1.22; DirectML package on Windows)",
+                );
+                h.note(ui, s.ort_library.display().to_string());
                 if h.button(ui, "Choose runtime library", false, true, false) {
                     actions.push("runtime");
                 }
@@ -10836,25 +11015,28 @@ impl Viewer {
                     32..=512,
                     "AI tile size (px, plus 8 px overlap)",
                 );
-                ui.label(RichText::new("Compatible models: one float32 RGB NCHW input and output, range 0–1, dynamic spatial dimensions, integer 1×–4× scale. Windows uses DirectML adapter 0. Supply your own model and matching runtime DLLs; restart after changing the runtime.").color(MUTED));
+                h.note(ui, RichText::new("Compatible models: one float32 RGB NCHW input and output, range 0–1, dynamic spatial dimensions, integer 1×–4× scale. Windows uses DirectML adapter 0. Supply your own model and matching runtime DLLs; restart after changing the runtime.").color(MUTED));
                 if h.button(ui, "Apply rendering settings / retry", false, true, false) {
                     *invalidate = true;
                 }
             }
             9 => {
-                settings_section(ui, "Profiles");
-                settings_section(ui, "Backups & restore");
+                h.section(ui, "Profiles");
+                h.section(ui, "Backups & restore");
                 if let Some(store) = &self.store {
-                    ui.label(format!(
-                        "State: {}",
-                        crate::state::database_path(store).display()
-                    ));
-                    ui.label(format!(
-                        "Primary backups: {}",
-                        store.exe_dir.join("backups").display()
-                    ));
+                    h.note(
+                        ui,
+                        format!("State: {}", crate::state::database_path(store).display()),
+                    );
+                    h.note(
+                        ui,
+                        format!(
+                            "Primary backups: {}",
+                            store.exe_dir.join("backups").display()
+                        ),
+                    );
                 }
-                ui.label("Primary backups are stored beside the executable. That folder must be writable.");
+                h.note(ui, "Primary backups are stored beside the executable. That folder must be writable.");
                 ui.horizontal(|ui| {
                     if h.button(ui, "Back up now", false, !self.backup_busy, false) {
                         actions.push("backup_now");
@@ -10870,8 +11052,8 @@ impl Viewer {
                     }
                 });
                 ui.separator();
-                ui.label("Additional backup location");
-                ui.label(s.backup_extra.display().to_string());
+                h.note(ui, "Additional backup location");
+                h.note(ui, s.backup_extra.display().to_string());
                 ui.horizontal(|ui| {
                     if h.button(ui, "Choose backup folder", false, true, false) {
                         actions.push("backup");
@@ -10895,12 +11077,12 @@ impl Viewer {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Time");
+                    h.note(ui, "Time");
                     h.watch(
                         ui.add(egui::DragValue::new(&mut s.backup_hour).range(0..=23)),
                         false,
                     );
-                    ui.label(":");
+                    h.note(ui, ":");
                     h.watch(
                         ui.add(egui::DragValue::new(&mut s.backup_minute).range(0..=59)),
                         false,
@@ -10912,16 +11094,16 @@ impl Viewer {
                     1..=100,
                     "Backups to keep per location",
                 );
-                ui.label("Missed schedules run at the next launch. Restore makes a safety copy of the current state first.");
-                ui.label("Backups contain settings, tags, favorites and view state, not the image or music files.");
+                h.note(ui, "Missed schedules run at the next launch. Restore makes a safety copy of the current state first.");
+                h.note(ui, "Backups contain settings, tags, favorites and view state, not the image or music files.");
             }
             10 => {
-                settings_section(ui, "Keyboard shortcuts");
-                ui.label("Click a field and type an egui key name, for example ArrowRight, Space, F11, or T.");
+                h.section(ui, "Keyboard shortcuts");
+                h.note(ui, "Click a field and type an egui key name, for example ArrowRight, Space, F11, or T.");
                 for (action, key) in &mut s.shortcuts {
                     ui.horizontal(|ui| {
                         ui.set_min_width(280.);
-                        ui.label(format!("{action:14}"));
+                        h.note(ui, format!("{action:14}"));
                         let response = ui.add(egui::TextEdit::singleline(key).desired_width(150.));
                         h.watch(response, false);
                         if egui::Key::from_name(key).is_none() {
@@ -10933,16 +11115,20 @@ impl Viewer {
                     s.shortcuts = Settings::default().shortcuts;
                 }
                 ui.separator();
-                ui.label(
+                h.note(
+                    ui,
                     "Escape closes the top dialog, settings or panel, then leaves fullscreen.",
                 );
-                settings_section(ui, "Mouse gestures");
+                h.section(ui, "Mouse gestures");
                 h.check(
                     ui,
                     &mut s.gestures,
                     "Gestures with the right mouse button (drag; a short click opens the menu)",
                 );
-                ui.label("The gesture closes the big image and the hover preview.");
+                h.note(
+                    ui,
+                    "The gesture closes the big image and the hover preview.",
+                );
                 h.check(
                     ui,
                     &mut s.gesture_opens_tile,
@@ -10957,7 +11143,7 @@ impl Viewer {
                     "Trail width (px)",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Gesture");
+                    h.note(ui, "Gesture");
                     for g in crate::gesture::Gesture::ALL {
                         if h.button(ui, g.label(), s.gesture == g, s.gestures, false) {
                             s.gesture = g;
@@ -10978,7 +11164,7 @@ impl Viewer {
                 );
             }
             _ => {
-                settings_section(ui, "Diagnostics");
+                h.section(ui, "Diagnostics");
                 h.check(
                     ui,
                     &mut s.diagnostic_log,
@@ -10989,7 +11175,8 @@ impl Viewer {
                     &mut s.window_diagnostics,
                     "Window size diagnostics: draw the window's edges and the pointer as NoirView sees them",
                 );
-                ui.label(
+                h.note(
+                    ui,
                     "Also writes window and surface sizes to data/noirview-window.log while on.",
                 );
             }
@@ -14443,7 +14630,23 @@ mod tests {
         assert!(circle[2] >= 3, "{circle:?}");
         assert_eq!(circle.iter().sum::<usize>(), circle[2]);
         assert!(count(&mut v, "lens")[0] >= 1);
+        // Words in any order; texts and section titles count too.
+        assert!(count(&mut v, "grid wrap")[2] >= 1);
+        assert!(
+            count(&mut v, "mp3")[7] >= 1,
+            "the Music page's formats line"
+        );
+        assert!(count(&mut v, "slideshow")[1] >= 1);
+        // Looser matching: a letter wrong or missing, the start of a word.
+        assert!(count(&mut v, "magnifer").iter().all(|n| *n == 0));
+        assert!(v.settings_nothing_found());
+        v.lib.settings.settings_search_loose = true;
+        assert!(count(&mut v, "magnifer")[0] >= 1);
+        assert!(count(&mut v, "slidesh")[1] >= 1);
+        assert!(!v.settings_nothing_found());
+        v.lib.settings.settings_search_loose = false;
         assert!(count(&mut v, "").is_empty(), "no search");
+        assert!(!v.settings_nothing_found());
         assert!(v.hover.search.is_empty() && v.hover.found.is_empty());
         // Reset: the page's settings back, folders and lists kept.
         let all = serde_json::to_value(Settings::default()).unwrap();
@@ -14470,6 +14673,31 @@ mod tests {
         v.lib.settings.reset_values(SETTINGS_RESET[0]);
         assert_eq!(v.lib.settings.lens_zoom, Settings::default().lens_zoom);
         assert_eq!(v.lib.settings.destination, PathBuf::from("/kept"));
+    }
+    #[test]
+    fn search_words_match_in_any_order_and_loosely_with_typos() {
+        assert!(search_matches("Grid pages wrap around", "grid wrap", false));
+        assert!(search_matches("Grid pages wrap around", "wrap grid", false));
+        assert!(!search_matches(
+            "Grid pages wrap around",
+            "grid wrap circle",
+            false
+        ));
+        assert!(!search_matches("Magnifier border", "magnifer", false));
+        assert!(search_matches("Magnifier border", "magnifer", true));
+        assert!(search_matches("Magnifier border", "magn", true));
+        assert!(search_matches(
+            "Thumbnail disk cache (MiB)",
+            "thumbnial",
+            true
+        ));
+        assert!(!search_matches("Volume", "colour", true), "too far");
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("wrap", "wrpa"), 2);
+        assert_eq!(
+            Settings::default().watch_pace,
+            crate::model::WatchPace::Balanced
+        );
     }
     #[test]
     fn unreadable_startup_cannot_backup_or_save_default_state_over_the_original() {
