@@ -22,6 +22,9 @@ pub struct Request {
     pub settings: Settings,
     pub max_side: u32,
     pub cancelled: AtomicBool,
+    /// Scrolled past while running: its file read stops (freeing the disk for
+    /// the image the view stops on); a decode past its read still finishes.
+    pub unwanted: AtomicBool,
 }
 pub struct Prepared {
     /// When a worker began this image (page preparation time).
@@ -226,6 +229,13 @@ impl WorkQueue {
         }
         self.wake.notify_all();
     }
+    /// Is this request's image needed on screen now?
+    pub fn is_priority(&self, request: &Request) -> bool {
+        let s = self.state.lock().unwrap();
+        s.jobs
+            .get(&request.key)
+            .is_some_and(|j| j.priority && std::ptr::eq(j.request.as_ref(), request))
+    }
     /// Use only this share of the memory budget (memory pressure).
     pub fn set_share(&self, share: f64) {
         self.state.lock().unwrap().share = Some(share);
@@ -257,7 +267,8 @@ impl WorkQueue {
         let cancel_running = s.cancel_running;
         s.jobs.retain(|key, job| {
             job.priority = high.contains(key);
-            if wanted.contains(key) {
+            if wanted.contains(key) || focus.contains(key) {
+                job.request.unwanted.store(false, Ordering::Relaxed);
                 return true;
             }
             if job.stage == Stage::Queued
@@ -270,7 +281,9 @@ impl WorkQueue {
                 return false;
             }
             // Ordinary in-flight decoding remains useful cache work. Navigation does
-            // not invalidate the source or processing parameters.
+            // not invalidate the source or processing parameters; only the
+            // file read stops.
+            job.request.unwanted.store(true, Ordering::Relaxed);
             true
         });
         s.high.clear();
@@ -286,6 +299,7 @@ impl WorkQueue {
                         settings: settings.clone(),
                         max_side,
                         cancelled: AtomicBool::new(false),
+                        unwanted: AtomicBool::new(false),
                     });
                     s.jobs.insert(
                         key.clone(),
@@ -380,6 +394,18 @@ impl WorkQueue {
         s.running -= 1;
         if !background {
             s.foreground_busy = false;
+        }
+        // A read stopped because the image was scrolled past: forgotten, so a
+        // later visit starts it again (not a failure).
+        if prepared.is_err()
+            && request.unwanted.load(Ordering::Relaxed)
+            && s.jobs
+                .get(&request.key)
+                .is_some_and(|j| Arc::ptr_eq(&j.request, &request))
+        {
+            s.jobs.remove(&request.key);
+            self.wake.notify_all();
+            return;
         }
         if !request.cancelled.load(Ordering::Relaxed)
             && s.jobs
@@ -512,6 +538,63 @@ mod tests {
             preview: false,
             revision: 0,
         }
+    }
+    #[test]
+    fn a_read_scrolled_past_stops_without_a_failure_and_starts_again_on_return() {
+        let q = WorkQueue::default();
+        let settings = Settings::default();
+        let (a, b) = (key("a"), key("b"));
+        q.plan(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&a),
+            &[],
+            &settings,
+            8192,
+        );
+        let running = q.take(false).unwrap();
+        assert!(q.is_priority(&running));
+        // Scrolled on: the read of a is to stop, but the job is kept.
+        q.plan(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            &[],
+            &settings,
+            8192,
+        );
+        assert!(running.unwanted.load(Ordering::Relaxed));
+        assert!(!running.cancelled.load(Ordering::Relaxed));
+        assert!(!q.is_priority(&running));
+        // Its read stopped: forgotten, not a failure.
+        q.complete(running, Err("cancelled".into()), false);
+        assert!(!q.state.lock().unwrap().jobs.contains_key(&a));
+        // Back to a: a new job starts it again.
+        q.plan(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&a),
+            &[],
+            &settings,
+            8192,
+        );
+        let again = q.take(false).unwrap();
+        assert_eq!(again.key, a);
+        assert!(!again.unwanted.load(Ordering::Relaxed));
+        // Wanted again while still running: the read goes on.
+        q.plan(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            &[],
+            &settings,
+            8192,
+        );
+        assert!(again.unwanted.load(Ordering::Relaxed));
+        q.plan(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&a),
+            &settings,
+            8192,
+        );
+        assert!(!again.unwanted.load(Ordering::Relaxed));
     }
     #[test]
     fn thumbnail_queue_cancels_running_work_for_a_page_left_behind() {

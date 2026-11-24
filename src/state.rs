@@ -412,6 +412,16 @@ pub enum Notice {
     BackedUp(Result<PathBuf, String>, Option<String>),
     Restored(Result<Box<Library>, String>),
 }
+/// The writer still has two requests to finish (a slow disk); the changes
+/// stay queued and go with the next request.
+#[derive(Debug)]
+pub struct WriterBusy;
+impl std::fmt::Display for WriterBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("State writer is busy; changes remain queued for retry")
+    }
+}
+impl std::error::Error for WriterBusy {}
 pub struct StateWriter {
     tx: Sender<Request>,
     pending: Patch,
@@ -530,7 +540,7 @@ impl StateWriter {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(request)) => {
                 self.pending = request.patch;
-                bail!("State writer is busy; changes remain queued for retry")
+                Err(WriterBusy.into())
             }
             Err(TrySendError::Disconnected(request)) => {
                 self.pending = request.patch;
@@ -808,7 +818,7 @@ mod tests {
         for i in 0..100 {
             lib.photos.entry("added.jpg".into()).or_default().favorite = i % 2 == 1;
             lib.last_image = Some(format!("{i}.jpg").into());
-            assert!(writer.save(&mut lib).is_err());
+            assert!(writer.save(&mut lib).unwrap_err().is::<WriterBusy>());
         }
         assert_eq!(writer.pending.photos.len(), 1);
         release_tx.send(()).unwrap();

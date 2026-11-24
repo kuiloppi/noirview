@@ -16,6 +16,7 @@ fn request(path: PathBuf, thumb: bool) -> Request {
         settings: Settings::default(),
         max_side: 8192,
         cancelled: AtomicBool::new(false),
+        unwanted: AtomicBool::new(false),
     }
 }
 #[test]

@@ -173,6 +173,7 @@ pub fn generate_thumbnail(
         settings: settings.clone(),
         max_side: 8192,
         cancelled: AtomicBool::new(false),
+        unwanted: AtomicBool::new(false),
     };
     let no_ai = Mutex::new(None::<(PathBuf, ort::session::Session)>);
     match decode(&request, &no_ai, None) {
@@ -863,9 +864,9 @@ impl<T: std::io::BufRead + std::io::Seek> Source for T {}
 const MAX_MEMORY_SOURCE: u64 = 256 * 1024 * 1024;
 const MAX_MEMORY_THUMBNAIL_SOURCE: u64 = 64 * 1024 * 1024;
 /// The whole file in memory when it is reasonably small: one sequential read
-/// (thumbnails take the shared one-at-a-time disk turn) instead of many
-/// small reads interleaved with other workers.
-fn open_source(r: &Request) -> Result<Box<dyn Source>> {
+/// (thumbnails and full images each take a one-at-a-time disk turn, the image
+/// on screen first) instead of many small reads interleaved with other workers.
+fn open_source(r: &Request, queue: Option<&WorkQueue>) -> Result<Box<dyn Source>> {
     let len = std::fs::metadata(&r.key.path)?.len();
     let started = Instant::now();
     let data = if r.key.thumb && len <= MAX_MEMORY_THUMBNAIL_SOURCE {
@@ -874,7 +875,15 @@ fn open_source(r: &Request) -> Result<Box<dyn Source>> {
             MAX_MEMORY_THUMBNAIL_SOURCE,
         )?)
     } else if !r.key.thumb && len <= MAX_MEMORY_SOURCE {
-        Some(std::fs::read(&r.key.path)?)
+        // Without a queue (background passes) the read is never urgent.
+        let data = crate::disk::read_image(
+            &r.key.path,
+            MAX_MEMORY_SOURCE,
+            || queue.is_some_and(|q| q.is_priority(r)),
+            || r.cancelled.load(Ordering::Relaxed) || r.unwanted.load(Ordering::Relaxed),
+        );
+        ensure!(!r.cancelled.load(Ordering::Relaxed), "cancelled");
+        Some(data?)
     } else {
         None
     };
@@ -929,7 +938,7 @@ fn decode_image(
             Err(_) => {} // Unsupported/over-limit JPEGs retain the ordinary thumbnail path.
         }
     }
-    let mut reader = image::ImageReader::new(open_source(r)?);
+    let mut reader = image::ImageReader::new(open_source(r, queue)?);
     if let Ok(format) = image::ImageFormat::from_path(&r.key.path) {
         reader.set_format(format);
     }
@@ -1508,6 +1517,7 @@ mod tests {
                 settings: Settings::default(),
                 max_side: 8192,
                 cancelled: AtomicBool::new(false),
+                unwanted: AtomicBool::new(false),
             };
             let (pixels, dimensions, _) = decode(&request, &Mutex::new(None), None).unwrap();
             assert_eq!(dimensions, [900, 300]);
@@ -2058,6 +2068,7 @@ mod tests {
             settings: Settings::default(),
             max_side: 8192,
             cancelled: AtomicBool::new(false),
+            unwanted: AtomicBool::new(false),
         }
     }
     #[test]
@@ -2277,6 +2288,7 @@ mod tests {
                 },
                 max_side: 8192,
                 cancelled: AtomicBool::new(false),
+                unwanted: AtomicBool::new(false),
             };
             let old = |thumb: bool| {
                 let reader = image::ImageReader::open(&path)
@@ -2332,6 +2344,7 @@ mod tests {
             },
             max_side: 8192,
             cancelled: AtomicBool::new(false),
+            unwanted: AtomicBool::new(false),
         };
         let old = best(&mut || {
             let reader = image::ImageReader::open(&path)

@@ -8,7 +8,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex,
+        Condvar, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -39,6 +39,114 @@ pub fn read_file(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let mut data = Vec::with_capacity(len as usize);
     file.take(limit).read_to_end(&mut data)?;
     Ok(data)
+}
+
+/// Full-size image sources: one file at a time, so a hard disk reads each
+/// file in one sweep; the image on screen goes first. Background reads go in
+/// chunks and step aside between them while the image on screen waits.
+struct ImageTurn {
+    busy: bool,
+    urgent_waiting: usize,
+}
+struct ReadTurn {
+    state: Mutex<ImageTurn>,
+    wake: Condvar,
+}
+static IMAGE_READS: ReadTurn = ReadTurn::new();
+const IMAGE_CHUNK: u64 = 4 * 1024 * 1024;
+
+/// Reads a whole image file (at most `limit` bytes) in the image read turn.
+/// `urgent`: the image is on screen (asked again each time the turn is
+/// taken). `cancelled`: the image is no longer wanted; a waiting or reading
+/// background read stops with `ErrorKind::Interrupted`.
+pub fn read_image(
+    path: &Path,
+    limit: u64,
+    urgent: impl Fn() -> bool,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<Vec<u8>> {
+    IMAGE_READS.read(path, limit, urgent, cancelled)
+}
+impl ReadTurn {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(ImageTurn {
+                busy: false,
+                urgent_waiting: 0,
+            }),
+            wake: Condvar::new(),
+        }
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, ImageTurn> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn read(
+        &self,
+        path: &Path,
+        limit: u64,
+        urgent: impl Fn() -> bool,
+        cancelled: impl Fn() -> bool,
+    ) -> io::Result<Vec<u8>> {
+        let mut file = fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        if len > limit {
+            return Err(io::Error::other("file exceeds the read limit"));
+        }
+        let stop = || io::Error::new(io::ErrorKind::Interrupted, "cancelled");
+        let mut data = Vec::with_capacity(len as usize);
+        loop {
+            let urgent = urgent();
+            {
+                let mut turn = self.lock();
+                if urgent {
+                    turn.urgent_waiting += 1;
+                }
+                while turn.busy || (!urgent && turn.urgent_waiting > 0) {
+                    if !urgent && cancelled() {
+                        return Err(stop());
+                    }
+                    turn = self
+                        .wake
+                        .wait_timeout(turn, Duration::from_millis(20))
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+                if urgent {
+                    turn.urgent_waiting -= 1;
+                }
+                turn.busy = true;
+            }
+            // Read while holding the turn; a background read steps aside after a
+            // chunk when the image on screen is waiting.
+            let result = (|| -> io::Result<bool> {
+                loop {
+                    if !urgent && cancelled() {
+                        return Err(stop());
+                    }
+                    let read = (&mut file).take(IMAGE_CHUNK).read_to_end(&mut data)?;
+                    if read == 0 || data.len() as u64 >= len {
+                        return Ok(true);
+                    }
+                    if !urgent && self.lock().urgent_waiting > 0 {
+                        return Ok(false);
+                    }
+                }
+            })();
+            self.lock().busy = false;
+            self.wake.notify_all();
+            match result {
+                Ok(true) => {
+                    // A file that grew while it was read stays within the limit.
+                    if data.len() as u64 > limit {
+                        return Err(io::Error::other("file exceeds the read limit"));
+                    }
+                    return Ok(data);
+                }
+                Ok(false) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 pub fn set_grid_demand(tiles: usize) {
@@ -85,5 +193,65 @@ mod tests {
         let t = Instant::now();
         yield_to_grid(Duration::from_secs(5));
         assert!(t.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn image_reads_take_turns_the_image_on_screen_first_and_stop_when_cancelled() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.bin");
+        let small = dir.path().join("small.bin");
+        let size = 3 * IMAGE_CHUNK as usize + 123;
+        fs::write(&big, (0..size).map(|i| i as u8).collect::<Vec<_>>()).unwrap();
+        fs::write(&small, vec![1u8; 10]).unwrap();
+        // Whole and intact, within the limit only.
+        let turn = Arc::new(ReadTurn::new());
+        let data = turn.read(&big, u64::MAX, || false, || false).unwrap();
+        assert_eq!(data.len(), size);
+        assert!(data.iter().enumerate().all(|(i, b)| *b == i as u8));
+        assert!(turn.read(&big, 1000, || true, || false).is_err());
+        assert_eq!(
+            read_image(&small, 100, || true, || false).unwrap().len(),
+            10
+        );
+        // A background read waits while the turn is held and gives up when
+        // its image is no longer wanted.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        turn.lock().busy = true;
+        let flag = cancelled.clone();
+        let path = small.clone();
+        let waiting_turn = turn.clone();
+        let waiting = std::thread::spawn(move || {
+            waiting_turn.read(&path, 100, || false, || flag.load(Ordering::Relaxed))
+        });
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!waiting.is_finished());
+        cancelled.store(true, Ordering::Relaxed);
+        let error = waiting.join().unwrap().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        // Waiting background reads let an urgent one go first.
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let spawn = |name: &'static str, urgent: bool| {
+            let order = order.clone();
+            let path = small.clone();
+            let turn = turn.clone();
+            std::thread::spawn(move || {
+                turn.read(&path, 100, move || urgent, || false).unwrap();
+                order.lock().unwrap().push(name);
+            })
+        };
+        let background = spawn("background", false);
+        std::thread::sleep(Duration::from_millis(40));
+        let urgent = spawn("urgent", true);
+        std::thread::sleep(Duration::from_millis(40));
+        {
+            let mut state = turn.lock();
+            assert_eq!(state.urgent_waiting, 1);
+            state.busy = false;
+        }
+        turn.wake.notify_all();
+        urgent.join().unwrap();
+        background.join().unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["urgent", "background"]);
     }
 }

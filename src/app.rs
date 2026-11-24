@@ -1908,6 +1908,9 @@ pub struct Viewer {
     restoring: bool,
     dirty: bool,
     last_save: Instant,
+    /// When the image on screen last changed (saves wait while browsing).
+    image_changed: Instant,
+    image_seen: Option<PathBuf>,
     files: Vec<PathBuf>,
     visible: VisibleFiles,
     current: Option<PathBuf>,
@@ -2240,6 +2243,8 @@ impl Viewer {
             restoring: false,
             dirty: false,
             last_save: Instant::now(),
+            image_changed: Instant::now(),
+            image_seen: None,
             files: vec![],
             visible: VisibleFiles::default(),
             current: None,
@@ -12485,7 +12490,9 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                     high.push(self.images.preview_key(path.clone()));
                 }
             }
-            high.insert(0, full);
+            // The full image after its preview: a cached thumbnail is ready in
+            // about a millisecond, a full decode can take a second on a hard disk.
+            high.push(full);
             let order = if self.slideshow {
                 self.lib.settings.slideshow_order
             } else {
@@ -12974,15 +12981,24 @@ impl eframe::App for Viewer {
                 });
         }
         self.hover.finish(ctx);
+        if self.image_seen != self.current {
+            self.image_seen = self.current.clone();
+            self.image_changed = Instant::now();
+        }
         if self.dirty
             && !self.restoring
             && !self.closing
-            && self.last_save.elapsed() >= crate::repaint::SAVE_INTERVAL
+            && crate::repaint::save_due(self.last_save, self.image_changed, Instant::now())
+                .is_zero()
             && self.persist_allowed
         {
             if let Some(writer) = &mut self.writer {
                 match writer.save(&mut self.lib) {
                     Ok(()) => self.dirty = false,
+                    // Retried with the next save; nothing for the user to do.
+                    Err(e) if e.is::<crate::state::WriterBusy>() => {
+                        self.log_line(&format!("Save postponed: {e}"))
+                    }
                     Err(e) => self.notify(format!("Cannot save settings: {e:#}")),
                 }
             }
@@ -13044,9 +13060,9 @@ impl eframe::App for Viewer {
             ));
         }
         if self.dirty && self.persist_allowed && self.writer.is_some() {
-            ctx.request_repaint_after(crate::repaint::remaining(
+            ctx.request_repaint_after(crate::repaint::save_due(
                 self.last_save,
-                crate::repaint::SAVE_INTERVAL,
+                self.image_changed,
                 now,
             ));
         }
