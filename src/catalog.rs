@@ -28,6 +28,15 @@ pub struct Stamp {
     pub size: u64,
     pub modified_ns: Option<i64>,
 }
+/// A time as signed nanoseconds since 1970, `None` outside the i64 range.
+pub fn nanos(time: std::time::SystemTime) -> Option<i64> {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_nanos()).ok(),
+        Err(before) => i64::try_from(before.duration().as_nanos())
+            .ok()
+            .map(|ns| -ns),
+    }
+}
 impl Stamp {
     pub fn from_metadata(metadata: &fs::Metadata) -> Self {
         let modified_ns =
@@ -118,7 +127,8 @@ fn as_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-const SCHEMA: i64 = 1;
+/// 2: `images.created` (creation time in nanoseconds, from the listing).
+const SCHEMA: i64 = 2;
 /// Pages written to the write-ahead log before SQLite checkpoints on its own.
 /// Every checkpoint waits for the disk; with the default of 1,000 pages a batch
 /// of 64 images triggers one almost every time, which a hard disk answers in
@@ -161,6 +171,7 @@ impl Catalog {
                 identity TEXT,
                 keywords_current INTEGER NOT NULL DEFAULT 1,
                 tags TEXT NOT NULL,
+                created INTEGER,
                 UNIQUE(folder,name));
             CREATE INDEX IF NOT EXISTS images_by_identity ON images(identity)
                 WHERE identity IS NOT NULL;
@@ -176,6 +187,10 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS facts(name TEXT PRIMARY KEY, value TEXT NOT NULL)
                 WITHOUT ROWID;",
         )?;
+        if version == 1 {
+            // Version 1 had no creation time; its rows stay as they are.
+            connection.execute_batch("ALTER TABLE images ADD COLUMN created INTEGER;")?;
+        }
         connection.pragma_update(None, "user_version", SCHEMA)?;
         connection.pragma_update(None, "wal_autocheckpoint", CHECKPOINT_PAGES)?;
         // This pragma answers with the value it set.
@@ -298,6 +313,97 @@ impl Catalog {
             return Err(error.into());
         }
         Ok(())
+    }
+    /// Make the scope's rows match a directory listing (full path, file state
+    /// and creation time from the listing): a row for each listed file that has
+    /// none, unread (`keywords_current = 0`, so never a cache hit), and no rows
+    /// for files no longer listed. Existing rows keep their id and keywords;
+    /// only a missing creation time is filled in. One transaction. Returns
+    /// (added, removed).
+    pub fn reconcile_listing(
+        &mut self,
+        folder: &Path,
+        depth: Depth,
+        listed: &[(PathBuf, Stamp, Option<i64>)],
+    ) -> Result<(usize, usize)> {
+        // What the scope holds: per full path, the row id and whether its
+        // creation time is missing (one query per folder).
+        let scope = self.folders(folder, depth)?;
+        let mut existing: HashMap<Vec<u8>, (i64, bool)> = HashMap::new();
+        {
+            let mut query = self
+                .connection
+                .prepare_cached("SELECT id,name,created IS NULL FROM images WHERE folder=?1")?;
+            for (id, path) in &scope {
+                let mut rows = query.query([id])?;
+                while let Some(row) = rows.next()? {
+                    existing.insert(
+                        join(path, &row.get::<_, Vec<u8>>(1)?),
+                        (row.get(0)?, row.get(2)?),
+                    );
+                }
+            }
+        }
+        let mut added = 0;
+        let tx = self.connection.transaction()?;
+        {
+            let mut add_folder = tx.prepare_cached(
+                "INSERT INTO folders(path) VALUES(?1) ON CONFLICT(path) DO NOTHING",
+            )?;
+            let mut folder_id = tx.prepare_cached("SELECT id FROM folders WHERE path=?1")?;
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO images(folder,name,size,modified,keywords_current,tags,created)
+                VALUES(?1,?2,?3,?4,0,'[]',?5)",
+            )?;
+            let mut set_created = tx.prepare_cached("UPDATE images SET created=?2 WHERE id=?1")?;
+            let mut folders: HashMap<Vec<u8>, i64> = HashMap::new();
+            for (path, stamp, born) in listed {
+                // Listed: no longer stale.
+                match existing.remove(&key(path)) {
+                    Some((id, missing_created)) => {
+                        if missing_created && born.is_some() {
+                            set_created.execute(params![id, born])?;
+                        }
+                    }
+                    None => {
+                        let (parent, name) = split(path)?;
+                        let id = match folders.get(&parent) {
+                            Some(id) => *id,
+                            None => {
+                                add_folder.execute([&parent])?;
+                                let id: i64 = folder_id.query_row([&parent], |r| r.get(0))?;
+                                folders.insert(parent, id);
+                                id
+                            }
+                        };
+                        insert.execute(params![
+                            id,
+                            name,
+                            as_i64(stamp.size),
+                            stamp.modified_ns,
+                            born
+                        ])?;
+                        added += 1;
+                    }
+                }
+            }
+            // What is left was not listed.
+            let mut delete = tx.prepare_cached("DELETE FROM images WHERE id=?1")?;
+            for (id, _) in existing.values() {
+                delete.execute([id])?;
+            }
+            if !existing.is_empty() {
+                let mut empty = tx.prepare_cached(
+                    "DELETE FROM folders WHERE id=?1
+                    AND NOT EXISTS(SELECT 1 FROM images WHERE folder=?1)",
+                )?;
+                for (id, _) in &scope {
+                    empty.execute([id])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok((added, existing.len()))
     }
     /// Images whose keywords are current, keyed by full-path bytes.
     pub fn load(&self, folder: &Path, depth: Depth) -> Result<HashMap<Vec<u8>, Entry>> {
@@ -911,6 +1017,127 @@ mod tests {
             .query_row("SELECT identity FROM images", [], |r| r.get(0))
             .unwrap();
         assert_eq!(identity.as_deref(), Some("unix:1:2:3"));
+    }
+    #[test]
+    fn reconciling_a_listing_adds_and_drops_exactly_those_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = catalog(dir.path());
+        let folder = dir.path().join("photos");
+        let path = |n: &str| folder.join(n);
+        c.store(&[
+            (path("kept.jpg"), entry(1, &["a"])),
+            (path("gone.jpg"), entry(2, &["b"])),
+        ])
+        .unwrap();
+        let kept_id = c
+            .ids(&folder, Depth::Children)
+            .unwrap()
+            .into_iter()
+            .find(|(_, p)| *p == key(&path("kept.jpg")))
+            .unwrap()
+            .0;
+        let stamp = |size| Stamp {
+            size,
+            modified_ns: Some(5),
+        };
+        let listed = vec![
+            (path("kept.jpg"), stamp(1), Some(111)),
+            (path("new1.jpg"), stamp(3), Some(222)),
+            (path("new2.jpg"), stamp(4), None),
+        ];
+        assert_eq!(
+            c.reconcile_listing(&folder, Depth::Children, &listed)
+                .unwrap(),
+            (2, 1)
+        );
+        let ids = c.ids(&folder, Depth::Children).unwrap();
+        let names: BTreeSet<Vec<u8>> = ids.iter().map(|(_, p)| p.clone()).collect();
+        assert_eq!(
+            names,
+            ["kept.jpg", "new1.jpg", "new2.jpg"]
+                .iter()
+                .map(|n| key(&path(n)))
+                .collect()
+        );
+        // The kept image keeps its id and keywords; new rows are unread.
+        assert!(ids.contains(&(kept_id, key(&path("kept.jpg")))));
+        let loaded = c.load(&folder, Depth::Children).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[&key(&path("kept.jpg"))].tags.contains("a"));
+        assert!(c.get(&path("new1.jpg")).unwrap().is_none());
+        // Creation times: filled for the kept row, stored for the new ones.
+        let created = |n: &str| -> Option<i64> {
+            c.connection
+                .query_row(
+                    "SELECT created FROM images WHERE name=?1",
+                    [n.as_bytes()],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(created("kept.jpg"), Some(111));
+        assert_eq!(created("new1.jpg"), Some(222));
+        assert_eq!(created("new2.jpg"), None);
+        // Reading an unread row's keywords makes it current, same id.
+        let new_id = ids
+            .iter()
+            .find(|(_, p)| *p == key(&path("new1.jpg")))
+            .unwrap()
+            .0;
+        c.store(&[(path("new1.jpg"), entry(3, &["c"]))]).unwrap();
+        assert!(c.get(&path("new1.jpg")).unwrap().is_some());
+        assert!(c
+            .ids(&folder, Depth::Children)
+            .unwrap()
+            .contains(&(new_id, key(&path("new1.jpg")))));
+        // Nothing changed: nothing added or removed.
+        assert_eq!(
+            c.reconcile_listing(&folder, Depth::Children, &listed)
+                .unwrap(),
+            (0, 0)
+        );
+    }
+    #[test]
+    fn a_version_1_catalog_gains_creation_times_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("catalog.sqlite3");
+        {
+            let c = Connection::open(&file).unwrap();
+            c.execute_batch(
+                "CREATE TABLE folders(id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE);
+                CREATE TABLE images(id INTEGER PRIMARY KEY,
+                    folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                    name BLOB NOT NULL, size INTEGER NOT NULL, modified INTEGER,
+                    sidecar_size INTEGER, sidecar_modified INTEGER, identity TEXT,
+                    keywords_current INTEGER NOT NULL DEFAULT 1, tags TEXT NOT NULL,
+                    UNIQUE(folder,name));
+                PRAGMA user_version=1;",
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO folders(id,path) VALUES(1,?1)",
+                [key(dir.path())],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO images(folder,name,size,modified,tags) VALUES(1,?1,7,9,'[\"old\"]')",
+                [b"a.jpg".as_slice()],
+            )
+            .unwrap();
+        }
+        let c = Catalog::open(&file).unwrap();
+        let row = c.get(&dir.path().join("a.jpg")).unwrap().unwrap();
+        assert!(row.tags.contains("old") && row.image.size == 7);
+        let version: i64 = c
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA);
+        let created: Option<i64> = c
+            .connection
+            .query_row("SELECT created FROM images", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(created, None);
     }
     #[test]
     fn a_desynchronised_catalog_is_reported_exactly() {

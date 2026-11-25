@@ -63,6 +63,41 @@ fn scale_bench_catalog() {
                 "ms",
             );
         }
+        // C1: a new collection's listing reconciled into an empty catalog, then
+        // the same listing again (a reopen with nothing changed).
+        {
+            let listed_db = dir.path().join("catalog-listing.sqlite3");
+            let mut catalog = Catalog::open(&listed_db).unwrap();
+            let listed: Vec<_> = rows
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.image, Some(1_600_000_000_000_000_000)))
+                .collect();
+            let started = Instant::now();
+            catalog
+                .reconcile_listing(&root, Depth::Subtree, &listed)
+                .unwrap();
+            report(
+                NAME,
+                count,
+                "reconcile_listing_first",
+                ms(started.elapsed()),
+                "ms",
+            );
+            let started = Instant::now();
+            assert_eq!(
+                catalog
+                    .reconcile_listing(&root, Depth::Subtree, &listed)
+                    .unwrap(),
+                (0, 0)
+            );
+            report(
+                NAME,
+                count,
+                "reconcile_listing_unchanged",
+                ms(started.elapsed()),
+                "ms",
+            );
+        }
         {
             // Batches of 64, as the indexing worker flushes them today.
             let mut catalog = Catalog::open(&database).unwrap();

@@ -296,10 +296,10 @@ fn run(
     let mut skipped = 0;
     // Fingerprints from the first listing: the initial pass checks the cache
     // against them without asking the file system for each file again.
-    let (mut files, mut listed, skip_note) = match model::scan(&folder, recursive) {
+    let (mut files, mut listed, created, skip_note) = match model::scan(&folder, recursive) {
         Ok(scanned) => {
             let note = skip_change(&mut skipped, &scanned);
-            (scanned.paths, scanned.listed, note)
+            (scanned.paths, scanned.listed, scanned.created, note)
         }
         Err(e) => {
             send(Update::Error(format!("{e:#}")));
@@ -327,11 +327,9 @@ fn run(
             if force {
                 db.clear(&folder, recursive)?;
             }
-            db.prune(
-                &folder,
-                recursive,
-                &files.iter().map(|p| keyword_index::key(p)).collect(),
-            )?;
+            // Every listed image gets its catalog row now; rows of files
+            // that are gone are dropped.
+            db.reconcile(&folder, recursive, &files, &listed, &created)?;
             db.load_any(&folder, recursive)
         })();
         match result {
@@ -410,7 +408,7 @@ fn run(
                         if let Some(note) = skip_change(&mut skipped, &scanned) {
                             send(Update::Warning(note));
                         }
-                        let next = scanned.paths;
+                        let next = scanned.paths.clone();
                         if next != files {
                             let valid: HashSet<_> =
                                 next.iter().map(|p| keyword_index::key(p)).collect();
@@ -426,7 +424,13 @@ fn run(
                                 return;
                             }
                             if let Some(db) = &mut index {
-                                if let Err(e) = db.prune(&folder, recursive, &valid) {
+                                if let Err(e) = db.reconcile(
+                                    &folder,
+                                    recursive,
+                                    &files,
+                                    &scanned.listed,
+                                    &scanned.created,
+                                ) {
                                     send(Update::Warning(format!("Keyword index cleanup: {e:#}")));
                                 }
                             }

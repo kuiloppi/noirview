@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     fs,
     path::Path,
     time::UNIX_EPOCH,
@@ -221,17 +221,35 @@ impl KeywordIndex {
         let rows = self.catalog.borrow().tag_rows(folder, depth(recursive))?;
         Ok(crate::catalog::Check::compare(files, rows))
     }
-    pub fn prune(
+    /// Give every listed image a row now (unread until its keywords are read)
+    /// and drop the rows of files no longer listed; replaces `prune` for the
+    /// folder worker. Returns (added, removed).
+    pub fn reconcile(
         &mut self,
         folder: &Path,
         recursive: bool,
-        valid: &HashSet<Vec<u8>>,
-    ) -> Result<()> {
+        paths: &[std::path::PathBuf],
+        listed: &HashMap<std::path::PathBuf, Fingerprint>,
+        created: &HashMap<std::path::PathBuf, std::time::SystemTime>,
+    ) -> Result<(usize, usize)> {
         self.write_pending()?;
+        let listed: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let image = listed.get(path).map_or(
+                    crate::catalog::Stamp {
+                        size: 0,
+                        modified_ns: None,
+                    },
+                    |l| l.to_entry(BTreeSet::new()).image,
+                );
+                let created = created.get(path).and_then(|t| crate::catalog::nanos(*t));
+                (path.clone(), image, created)
+            })
+            .collect();
         self.catalog
             .borrow_mut()
-            .retain(folder, depth(recursive), valid)?;
-        Ok(())
+            .reconcile_listing(folder, depth(recursive), &listed)
     }
     pub fn remove(&self, _folder: &Path, _recursive: bool, path: &Path) -> Result<()> {
         self.write_pending()?;

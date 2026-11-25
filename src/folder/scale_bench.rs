@@ -198,11 +198,19 @@ fn scale_bench_folder_open() {
 
         {
             let mut index = KeywordIndex::open(&database).unwrap();
-            let valid: HashSet<_> = (0..count)
-                .map(|i| keyword_index::key(&bench::tree_path(&tree, i)))
-                .collect();
+            // The folder worker's step after a scan (C1: reconcile the listing;
+            // before, pruning), with nothing changed.
+            let scanned = model::scan(&tree, true).unwrap();
             let started = Instant::now();
-            index.prune(&tree, true, &valid).unwrap();
+            index
+                .reconcile(
+                    &tree,
+                    true,
+                    &scanned.paths,
+                    &scanned.listed,
+                    &scanned.created,
+                )
+                .unwrap();
             report(
                 NAME,
                 count,

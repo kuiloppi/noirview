@@ -1739,6 +1739,7 @@ pub fn supported(path: &Path) -> bool {
 pub struct Listed {
     pub len: u64,
     pub modified: Option<std::time::SystemTime>,
+    pub created: Option<std::time::SystemTime>,
 }
 /// One entry of a folder walk.
 pub enum ScanEntry {
@@ -1756,6 +1757,8 @@ pub struct Scanned {
     /// Each image's fingerprint (with its `.xmp` sidecar) from the listing,
     /// for checking the keyword cache without asking the file system again.
     pub listed: HashMap<PathBuf, crate::keyword_index::Fingerprint>,
+    /// Each image's creation time from the listing (where it has one).
+    pub created: HashMap<PathBuf, std::time::SystemTime>,
     /// Entries below the opened folder that could not be read and were skipped.
     pub skipped: usize,
     pub first_skipped: Option<String>,
@@ -1787,6 +1790,7 @@ pub fn scan(folder: &Path, recursive: bool) -> anyhow::Result<Scanned> {
                     .map(|m| Listed {
                         len: m.len(),
                         modified: m.modified().ok(),
+                        created: m.created().ok(),
                     });
                 ScanEntry::File(e.into_path(), listed)
             }
@@ -1824,6 +1828,9 @@ pub fn collect_scan(entries: impl IntoIterator<Item = ScanEntry>) -> anyhow::Res
     }
     for (path, listed) in scanned.paths.iter().zip(stamps) {
         if let Some(listed) = listed {
+            if let Some(created) = listed.created {
+                scanned.created.insert(path.clone(), created);
+            }
             let sidecar = sidecars
                 .get(&listing_key(&crate::metadata::sidecar(path)))
                 .copied();
