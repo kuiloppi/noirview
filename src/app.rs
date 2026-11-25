@@ -333,6 +333,8 @@ type PageTimes = (Duration, Option<Duration>);
 struct ViewTimer {
     path: PathBuf,
     opened: Instant,
+    /// Where the full image stood when it came on screen (diagnostic log).
+    at_open: String,
     /// Reduced picture shown before full detail: (after, longer side in px).
     first: Option<(Duration, usize)>,
     /// A larger reduced picture that replaced it (a stored first view after
@@ -345,7 +347,8 @@ impl ViewTimer {
         let sharp = self.sharp?.as_millis();
         if self.first.is_none() {
             return Some(format!(
-                "full detail after {sharp} ms, no first view needed"
+                "full detail after {sharp} ms, no first view needed [{}]",
+                self.at_open
             ));
         }
         let mut text = String::new();
@@ -356,7 +359,10 @@ impl ViewTimer {
                 after.as_millis()
             );
         }
-        Some(format!("{text}full detail after {sharp} ms"))
+        Some(format!(
+            "{text}full detail after {sharp} ms [{}]",
+            self.at_open
+        ))
     }
     /// A reduced picture arrived on screen.
     fn reduced(&mut self, side: usize) {
@@ -4514,9 +4520,15 @@ impl Viewer {
         }
         let magnifier_delay = self.magnifier_delay(ctx);
         if self.view_timer.as_ref().is_none_or(|t| t.path != path) {
+            let at_open = if self.lib.settings.diagnostic_log {
+                self.images.describe(&self.images.key(path.clone(), false))
+            } else {
+                String::new()
+            };
             self.view_timer = Some(ViewTimer {
                 path: path.clone(),
                 opened: Instant::now(),
+                at_open,
                 first: None,
                 better: None,
                 sharp: None,
@@ -4742,10 +4754,19 @@ impl Viewer {
         }
         let index = self.visible.position(&path).unwrap_or(0);
         let meta = self.lib.photos.get(&path).cloned().unwrap_or_default();
-        let caption = format!(
-            "{} / {}   {}{}",
-            index + 1,
-            self.visible.len(),
+        // The position stays centred whatever follows it; the marks and the
+        // slideshow state go to its right.
+        let font = egui::FontId::proportional(12.);
+        let at = Pos2::new(area.center().x, area.bottom() - 14.);
+        let counter = ui.painter().text(
+            at,
+            egui::Align2::CENTER_CENTER,
+            format!("{} / {}", index + 1, self.visible.len()),
+            font.clone(),
+            MUTED,
+        );
+        let after = format!(
+            "{}{}",
             if meta.elite {
                 "★ Elite"
             } else if meta.favorite {
@@ -4763,13 +4784,15 @@ impl Viewer {
                 ""
             }
         );
-        ui.painter().text(
-            Pos2::new(area.center().x, area.bottom() - 14.),
-            egui::Align2::CENTER_CENTER,
-            caption,
-            egui::FontId::proportional(12.),
-            MUTED,
-        );
+        if !after.is_empty() {
+            ui.painter().text(
+                Pos2::new(counter.right() + 14., at.y),
+                egui::Align2::LEFT_CENTER,
+                after.trim_start(),
+                font,
+                MUTED,
+            );
+        }
     }
     fn draw_grid(&mut self, ui: &mut egui::Ui) {
         use crate::grid_layout::{layout, Area};
@@ -12452,7 +12475,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         let thumbs = crate::decode_stats::take().unwrap_or_else(|| "-".into());
         let paint = paint_summary(&eframe::noirview_diag::take_paint_stats());
         let line = format!(
-            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} thumbs=[{}] paint=[{}]\n",
+            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} prefetch=[ahead {} behind {} · {}] reads=[{}] thumbs=[{}] paint=[{}]\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
@@ -12471,6 +12494,10 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                 g.usage.map_or("-".into(), crate::memory::size),
                 g.budget.map_or("-".into(), crate::memory::size)
             )),
+            self.lib.settings.prefetch_ahead,
+            self.lib.settings.prefetch_behind,
+            self.images.prefetch_summary(),
+            crate::disk::take_read_stats(),
             thumbs,
             paint,
         );
@@ -13195,6 +13222,7 @@ mod tests {
         let mut timer = ViewTimer {
             path: "a.png".into(),
             opened: Instant::now(),
+            at_open: "in memory".into(),
             first: None,
             better: None,
             sharp: None,
@@ -13203,12 +13231,12 @@ mod tests {
         timer.sharp = Some(Duration::from_millis(180));
         assert_eq!(
             timer.summary().unwrap(),
-            "full detail after 180 ms, no first view needed"
+            "full detail after 180 ms, no first view needed [in memory]"
         );
         timer.first = Some((Duration::from_millis(35), 2560));
         assert_eq!(
             timer.summary().unwrap(),
-            "First view 2560 px after 35 ms · full detail after 180 ms"
+            "First view 2560 px after 35 ms · full detail after 180 ms [in memory]"
         );
         assert!(timer.had_first_view());
         // The grid thumbnail first, then the stored first view, then detail.
@@ -13222,7 +13250,7 @@ mod tests {
         let summary = timer.summary().unwrap();
         assert!(summary.starts_with("Preview 512 px after "));
         assert!(summary.contains(" · First view 2560 px after "));
-        assert!(summary.ends_with(" · full detail after 180 ms"));
+        assert!(summary.ends_with(" · full detail after 180 ms [in memory]"));
     }
     #[test]
     fn real_watcher_state_worker_and_view_preserve_marks_after_external_rename() {

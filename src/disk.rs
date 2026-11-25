@@ -55,6 +55,29 @@ struct ReadTurn {
 static IMAGE_READS: ReadTurn = ReadTurn::new();
 const IMAGE_CHUNK: u64 = 4 * 1024 * 1024;
 
+/// Image read statistics for the diagnostic log (taken and reset every 5 s).
+static READS_URGENT: AtomicUsize = AtomicUsize::new(0);
+static READS_BACKGROUND: AtomicUsize = AtomicUsize::new(0);
+static READS_STOPPED: AtomicUsize = AtomicUsize::new(0);
+static STEPPED_ASIDE: AtomicUsize = AtomicUsize::new(0);
+static READ_MS: AtomicUsize = AtomicUsize::new(0);
+static WAIT_MS: AtomicUsize = AtomicUsize::new(0);
+static READ_MIB: AtomicUsize = AtomicUsize::new(0);
+/// "urgent U background B (stopped S, stepped aside A) · R MiB in T ms, waited W ms".
+pub fn take_read_stats() -> String {
+    let take = |a: &AtomicUsize| a.swap(0, Ordering::Relaxed);
+    format!(
+        "urgent {} background {} (stopped {}, stepped aside {}) · {} MiB in {} ms, waited {} ms",
+        take(&READS_URGENT),
+        take(&READS_BACKGROUND),
+        take(&READS_STOPPED),
+        take(&STEPPED_ASIDE),
+        take(&READ_MIB),
+        take(&READ_MS),
+        take(&WAIT_MS)
+    )
+}
+
 /// Reads a whole image file (at most `limit` bytes) in the image read turn.
 /// `urgent`: the image is on screen (asked again each time the turn is
 /// taken). `cancelled`: the image is no longer wanted; a waiting or reading
@@ -92,10 +115,24 @@ impl ReadTurn {
         if len > limit {
             return Err(io::Error::other("file exceeds the read limit"));
         }
-        let stop = || io::Error::new(io::ErrorKind::Interrupted, "cancelled");
+        let stop = || {
+            READS_STOPPED.fetch_add(1, Ordering::Relaxed);
+            io::Error::new(io::ErrorKind::Interrupted, "cancelled")
+        };
         let mut data = Vec::with_capacity(len as usize);
+        let mut counted = false;
         loop {
             let urgent = urgent();
+            if !counted {
+                counted = true;
+                if urgent {
+                    &READS_URGENT
+                } else {
+                    &READS_BACKGROUND
+                }
+                .fetch_add(1, Ordering::Relaxed);
+            }
+            let asked = Instant::now();
             {
                 let mut turn = self.lock();
                 if urgent {
@@ -116,6 +153,8 @@ impl ReadTurn {
                 }
                 turn.busy = true;
             }
+            WAIT_MS.fetch_add(asked.elapsed().as_millis() as usize, Ordering::Relaxed);
+            let reading = Instant::now();
             // Read while holding the turn; a background read steps aside after a
             // chunk when the image on screen is waiting.
             let result = (|| -> io::Result<bool> {
@@ -134,8 +173,13 @@ impl ReadTurn {
             })();
             self.lock().busy = false;
             self.wake.notify_all();
+            READ_MS.fetch_add(reading.elapsed().as_millis() as usize, Ordering::Relaxed);
+            if matches!(result, Ok(false)) {
+                STEPPED_ASIDE.fetch_add(1, Ordering::Relaxed);
+            }
             match result {
                 Ok(true) => {
+                    READ_MIB.fetch_add(data.len() >> 20, Ordering::Relaxed);
                     // A file that grew while it was read stays within the limit.
                     if data.len() as u64 > limit {
                         return Err(io::Error::other("file exceeds the read limit"));

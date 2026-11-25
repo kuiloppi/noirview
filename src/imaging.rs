@@ -714,6 +714,36 @@ impl Images {
     pub fn failure(&self, key: &Key) -> Option<&str> {
         self.failures.get(key).map(|s| s.as_str())
     }
+    /// For the diagnostic log: where an image stands when it comes on screen.
+    pub fn describe(&self, key: &Key) -> String {
+        if self.textures.contains_key(key) {
+            return "in memory".into();
+        }
+        let planned = if self.prefetch.contains(key) {
+            "prefetch planned"
+        } else {
+            "not in the prefetch plan"
+        };
+        match self.queue.stage_of(key) {
+            Some(stage) => format!("{stage} ({planned})"),
+            None => planned.into(),
+        }
+    }
+    /// For the diagnostic log: prefetch admitted, full textures held, and the
+    /// full-image queue's queued / running / ready jobs.
+    pub fn prefetch_summary(&self) -> String {
+        let (queued, running, ready) = self.queue.counts();
+        let full = self
+            .textures
+            .keys()
+            .filter(|k| !k.thumb && !k.preview)
+            .count();
+        format!(
+            "admitted {} · full images in memory {} · jobs {queued}/{running}/{ready}",
+            self.prefetch.len(),
+            full
+        )
+    }
     pub fn memory_mb(&self) -> usize {
         self.textures.values().map(|t| t.bytes).sum::<usize>() / (1024 * 1024)
     }

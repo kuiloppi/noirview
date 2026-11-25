@@ -229,6 +229,25 @@ impl WorkQueue {
         }
         self.wake.notify_all();
     }
+    /// For the diagnostic log: the job of `key`, if any.
+    pub fn stage_of(&self, key: &Key) -> Option<&'static str> {
+        let s = self.state.lock().unwrap();
+        s.jobs.get(key).map(|j| match j.stage {
+            Stage::Queued => "queued",
+            Stage::Running => "running",
+            Stage::Ready => "decoded, waiting for upload",
+        })
+    }
+    /// For the diagnostic log: (queued, running, ready) jobs.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let s = self.state.lock().unwrap();
+        let count = |stage: Stage| s.jobs.values().filter(|j| j.stage == stage).count();
+        (
+            count(Stage::Queued),
+            count(Stage::Running),
+            count(Stage::Ready),
+        )
+    }
     /// Is this request's image needed on screen now?
     pub fn is_priority(&self, request: &Request) -> bool {
         let s = self.state.lock().unwrap();
