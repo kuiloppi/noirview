@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "ui_list";
 
-/// Run one view build to completion the way `Viewer::poll_view` does: slices of
-/// at most 2 ms or 2048 steps. Returns total working time and the slice count.
+/// Run one view build to completion the way `Viewer::poll_view` does in frames
+/// without input (`view_build::slice`). Returns total working time and the
+/// slice count.
 fn build(
     files: &[PathBuf],
     photos: &Photos,
@@ -21,9 +22,10 @@ fn build(
     let mut slices = 0;
     loop {
         slices += 1;
-        let deadline = Instant::now() + Duration::from_millis(2);
+        let (time, steps) = super::view_build::slice(false);
+        let deadline = Instant::now() + time;
         let mut done = false;
-        for _ in 0..2048 {
+        for _ in 0..steps {
             done = view.step(files, photos, previous);
             if done || Instant::now() >= deadline {
                 break;

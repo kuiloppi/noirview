@@ -1911,6 +1911,8 @@ pub struct Viewer {
     /// When the image on screen last changed (saves wait while browsing).
     image_changed: Instant,
     image_seen: Option<PathBuf>,
+    /// This frame had input (smaller work slices, `view_build::slice`).
+    frame_input: bool,
     files: Vec<PathBuf>,
     visible: VisibleFiles,
     current: Option<PathBuf>,
@@ -2245,6 +2247,7 @@ impl Viewer {
             last_save: Instant::now(),
             image_changed: Instant::now(),
             image_seen: None,
+            frame_input: false,
             files: vec![],
             visible: VisibleFiles::default(),
             current: None,
@@ -2849,10 +2852,12 @@ impl Viewer {
         let Some(build) = &mut self.view_build else {
             return;
         };
-        let deadline = Instant::now() + Duration::from_millis(2);
+        // Larger slices when this frame had no input; the step ceiling also
+        // keeps synthetic/very fast predicates cooperative.
+        let (time, steps) = crate::model::view_slice(self.frame_input);
+        let deadline = Instant::now() + time;
         let mut done = false;
-        // The ceiling also keeps synthetic/very fast predicates cooperative.
-        for _ in 0..2048 {
+        for _ in 0..steps {
             done = build.step(&self.files, &self.lib.photos, &self.nav);
             if done || Instant::now() >= deadline {
                 break;
@@ -5810,15 +5815,23 @@ impl Viewer {
             "gesture dx={dx:.0} dy={dy:.0} ms={ms} matched={matched} action={action}"
         ));
     }
-    /// Sort the file list by the chosen key. Name/type sort here; metadata keys
-    /// are read on a worker and arrive as Event::Sorted.
+    /// Sort the file list by the chosen key. Name/type sort here (over 20,000
+    /// paths on a worker); metadata keys are read on a worker. Worker results
+    /// arrive as Event::Sorted.
     fn sort_files(&mut self) {
         self.sort_request += 1;
         let (key, desc) = (
             self.lib.settings.sort_key,
             self.lib.settings.sort_descending,
         );
-        if key.needs_metadata() {
+        // Already in order (the usual case after a reopen): nothing to do.
+        if crate::sorting::is_sorted(&self.files, key, desc) {
+            return;
+        }
+        // Large lists sort on a worker too; small ones at once, so a small
+        // folder does not visibly change order after opening.
+        const WORKER_SORT_FROM: usize = 20_000;
+        if key.needs_metadata() || self.files.len() > WORKER_SORT_FROM {
             let mut files = self.files.clone();
             let (tx, request) = (self.tx.clone(), self.sort_request);
             std::thread::spawn(move || {
@@ -12767,6 +12780,7 @@ fn order_controls(ui: &mut egui::Ui, h: &mut Hover, order: &mut Order, id: &str)
 }
 impl eframe::App for Viewer {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.frame_input = !raw.events.is_empty();
         // Unit tests drive these process-wide gates themselves.
         if !cfg!(test) {
             let s = &self.lib.settings;

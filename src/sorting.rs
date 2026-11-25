@@ -36,64 +36,108 @@ impl SortKey {
     }
 }
 
-/// Case-insensitive comparison where digit runs compare by value.
+/// Case-insensitive comparison where digit runs compare by value. Ties fall
+/// back to the plain string order. Allocates nothing.
 pub fn natural(a: &str, b: &str) -> Ordering {
-    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    let (mut i, mut j) = (0, 0);
     loop {
-        match (x.peek().copied(), y.peek().copied()) {
+        match (a[i..].chars().next(), b[j..].chars().next()) {
             (None, None) => return a.cmp(b),
             (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
             (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
-                let take = |it: &mut std::iter::Peekable<std::str::Chars>| {
-                    let mut s = String::new();
-                    while let Some(c) = it.peek().copied().filter(char::is_ascii_digit) {
-                        s.push(c);
-                        it.next();
-                    }
-                    s
+                let end = |s: &str, from: usize| {
+                    from + s.as_bytes()[from..]
+                        .iter()
+                        .take_while(|b| b.is_ascii_digit())
+                        .count()
                 };
-                let (m, n) = (take(&mut x), take(&mut y));
-                let (mt, nt) = (m.trim_start_matches('0'), n.trim_start_matches('0'));
-                let order = mt.len().cmp(&nt.len()).then_with(|| mt.cmp(nt));
+                let (ie, je) = (end(a, i), end(b, j));
+                let (m, n) = (
+                    a[i..ie].trim_start_matches('0'),
+                    b[j..je].trim_start_matches('0'),
+                );
+                let order = m.len().cmp(&n.len()).then_with(|| m.cmp(n));
                 if order != Ordering::Equal {
                     return order;
                 }
+                (i, j) = (ie, je);
             }
             (Some(c), Some(d)) => {
                 let order = c.to_lowercase().cmp(d.to_lowercase());
                 if order != Ordering::Equal {
                     return order;
                 }
-                x.next();
-                y.next();
+                i += c.len_utf8();
+                j += d.len_utf8();
             }
         }
     }
 }
 
-fn name(p: &Path) -> String {
-    p.file_name()
+fn name(p: &Path) -> std::borrow::Cow<'_, str> {
+    p.file_name().unwrap_or_default().to_string_lossy()
+}
+fn extension(p: &Path) -> String {
+    p.extension()
         .unwrap_or_default()
         .to_string_lossy()
-        .into_owned()
+        .to_lowercase()
+}
+/// Name order: natural file name, then the whole path.
+fn name_order(a: (&str, &Path), b: (&str, &Path)) -> Ordering {
+    natural(a.0, b.0).then_with(|| a.1.cmp(b.1))
+}
+
+/// Whether `paths` are already in the order `sort` gives for Name or Type
+/// (one pass; other keys answer false).
+pub fn is_sorted(paths: &[PathBuf], key: SortKey, descending: bool) -> bool {
+    if !matches!(key, SortKey::Name | SortKey::Type) {
+        return false;
+    }
+    paths.windows(2).all(|w| {
+        let (a, b) = if descending {
+            (&w[1], &w[0])
+        } else {
+            (&w[0], &w[1])
+        };
+        let names = name_order((&name(a), a), (&name(b), b));
+        let order = if key == SortKey::Type {
+            extension(a).cmp(&extension(b)).then(names)
+        } else {
+            names
+        };
+        order != Ordering::Greater
+    })
 }
 
 /// Sort in place. Metadata keys read each file's metadata once; unreadable
 /// files sort last. Ties fall back to the natural name order.
 pub fn sort(paths: &mut [PathBuf], key: SortKey, descending: bool) {
-    let by_name = |a: &PathBuf, b: &PathBuf| natural(&name(a), &name(b)).then_with(|| a.cmp(b));
+    let by_name = |a: &PathBuf, b: &PathBuf| name_order((&name(a), a), (&name(b), b));
+    // Name and Type: keys made once per path, not on every comparison.
+    let decorated = |paths: &mut [PathBuf], with_type: bool| {
+        let mut keyed: Vec<(String, String, PathBuf)> = paths
+            .iter_mut()
+            .map(|p| {
+                let ext = if with_type {
+                    extension(p)
+                } else {
+                    String::new()
+                };
+                (ext, name(p).into_owned(), std::mem::take(p))
+            })
+            .collect();
+        keyed.sort_by(|(xa, na, a), (xb, nb, b)| {
+            xa.cmp(xb).then_with(|| name_order((na, a), (nb, b)))
+        });
+        for (slot, (_, _, p)) in paths.iter_mut().zip(keyed) {
+            *slot = p;
+        }
+    };
     match key {
-        SortKey::Name => paths.sort_by(by_name),
-        SortKey::Type => paths.sort_by(|a, b| {
-            let ext = |p: &PathBuf| {
-                p.extension()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_lowercase()
-            };
-            ext(a).cmp(&ext(b)).then_with(|| by_name(a, b))
-        }),
+        SortKey::Name => decorated(paths, false),
+        SortKey::Type => decorated(paths, true),
         _ => {
             let value = |p: &PathBuf| -> Option<u128> {
                 let m = std::fs::metadata(p).ok()?;
@@ -134,6 +178,115 @@ pub fn sort(paths: &mut [PathBuf], key: SortKey, descending: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The comparator before keys were made once (reference for the order).
+    fn old_natural(a: &str, b: &str) -> Ordering {
+        let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+        loop {
+            match (x.peek().copied(), y.peek().copied()) {
+                (None, None) => return a.cmp(b),
+                (None, Some(_)) => return Ordering::Less,
+                (Some(_), None) => return Ordering::Greater,
+                (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
+                    let take = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                        let mut s = String::new();
+                        while let Some(c) = it.peek().copied().filter(char::is_ascii_digit) {
+                            s.push(c);
+                            it.next();
+                        }
+                        s
+                    };
+                    let (m, n) = (take(&mut x), take(&mut y));
+                    let (mt, nt) = (m.trim_start_matches('0'), n.trim_start_matches('0'));
+                    let order = mt.len().cmp(&nt.len()).then_with(|| mt.cmp(nt));
+                    if order != Ordering::Equal {
+                        return order;
+                    }
+                }
+                (Some(c), Some(d)) => {
+                    let order = c.to_lowercase().cmp(d.to_lowercase());
+                    if order != Ordering::Equal {
+                        return order;
+                    }
+                    x.next();
+                    y.next();
+                }
+            }
+        }
+    }
+    fn old_sort(paths: &mut [PathBuf], key: SortKey, descending: bool) {
+        let name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        let by_name =
+            |a: &PathBuf, b: &PathBuf| old_natural(&name(a), &name(b)).then_with(|| a.cmp(b));
+        let ext = |p: &PathBuf| {
+            p.extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase()
+        };
+        match key {
+            SortKey::Name => paths.sort_by(by_name),
+            _ => paths.sort_by(|a, b| ext(a).cmp(&ext(b)).then_with(|| by_name(a, b))),
+        }
+        if descending {
+            paths.reverse();
+        }
+    }
+
+    #[test]
+    fn keyed_name_and_type_sorting_gives_the_same_order_as_before() {
+        use rand::{seq::SliceRandom, Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let parts = [
+            "img", "IMG", "Img", "a", "Z", "äiti", "Ärla", "ß", "photo_", "x-", " ", ".", "é",
+            "日本",
+        ];
+        let exts = ["jpg", "JPG", "png", "Png", "webp", "gif", ""];
+        let folders = ["/p", "/p/sub", "/P", "/q/2"];
+        for round in 0..40 {
+            let mut paths: Vec<PathBuf> = (0..200)
+                .map(|_| {
+                    let mut name = String::new();
+                    for _ in 0..rng.gen_range(1..4) {
+                        name.push_str(parts.choose(&mut rng).unwrap());
+                        if rng.gen_bool(0.7) {
+                            let zeros = "0".repeat(rng.gen_range(0..3));
+                            name.push_str(&format!("{zeros}{}", rng.gen_range(0..120)));
+                        }
+                    }
+                    let ext = exts.choose(&mut rng).unwrap();
+                    if !ext.is_empty() {
+                        name = format!("{name}.{ext}");
+                    }
+                    Path::new(folders.choose(&mut rng).unwrap()).join(name)
+                })
+                .collect();
+            // Equal names in different folders.
+            paths.push(PathBuf::from("/p/same.jpg"));
+            paths.push(PathBuf::from("/q/2/same.jpg"));
+            for key in [SortKey::Name, SortKey::Type] {
+                for descending in [false, true] {
+                    let mut new = paths.clone();
+                    let mut old = paths.clone();
+                    sort(&mut new, key, descending);
+                    old_sort(&mut old, key, descending);
+                    assert_eq!(new, old, "round {round}, {key:?}, descending {descending}");
+                    assert!(is_sorted(&new, key, descending));
+                }
+            }
+            // Pairwise as well (every outcome, not only the sorted result).
+            for w in paths.windows(2) {
+                let (a, b) = (name(&w[0]), name(&w[1]));
+                assert_eq!(natural(&a, &b), old_natural(&a, &b), "{a} / {b}");
+            }
+        }
+        let mut shuffled = vec![PathBuf::from("/b2.jpg"), PathBuf::from("/b10.jpg")];
+        assert!(is_sorted(&shuffled, SortKey::Name, false));
+        shuffled.reverse();
+        assert!(!is_sorted(&shuffled, SortKey::Name, false));
+        assert!(is_sorted(&shuffled, SortKey::Name, true));
+        assert!(!is_sorted(&shuffled, SortKey::Size, false));
+    }
 
     #[test]
     fn natural_order_compares_numbers_by_value_and_ignores_case() {

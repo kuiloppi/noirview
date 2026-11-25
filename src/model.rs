@@ -8,7 +8,7 @@ use std::{
     ops::Deref,
     path::{Path, PathBuf},
 };
-pub use view_build::{Retire, ViewBuild};
+pub use view_build::{slice as view_slice, Retire, ViewBuild};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Order {

@@ -3,6 +3,19 @@
 use super::*;
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use std::collections::VecDeque;
+use std::time::Duration;
+
+/// How much of a view build one frame may do (time, steps). While the user
+/// is giving input the slice stays small so wheel and pointer stay smooth;
+/// a frame without input can do four times as much, so a long list is ready
+/// sooner when nobody is waiting on the frame.
+pub fn slice(input: bool) -> (Duration, usize) {
+    if input {
+        (Duration::from_millis(2), 2048)
+    } else {
+        (Duration::from_millis(8), 8192)
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Phase {
@@ -195,6 +208,11 @@ impl Retire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_frame_without_input_builds_more_of_the_view() {
+        assert_eq!(slice(true), (Duration::from_millis(2), 2048));
+        assert_eq!(slice(false), (Duration::from_millis(8), 8192));
+    }
     fn run(
         mut job: ViewBuild,
         files: &[PathBuf],
