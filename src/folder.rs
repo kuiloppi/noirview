@@ -294,10 +294,12 @@ fn run(
         }
     };
     let mut skipped = 0;
-    let (mut files, skip_note) = match model::scan(&folder, recursive) {
+    // Fingerprints from the first listing: the initial pass checks the cache
+    // against them without asking the file system for each file again.
+    let (mut files, mut listed, skip_note) = match model::scan(&folder, recursive) {
         Ok(scanned) => {
             let note = skip_change(&mut skipped, &scanned);
-            (scanned.paths, note)
+            (scanned.paths, scanned.listed, note)
         }
         Err(e) => {
             send(Update::Error(format!("{e:#}")));
@@ -456,8 +458,11 @@ fn run(
         }
         if let Some((path, force)) = work.pop() {
             if known.contains(&path) {
+                // Only the initial pass (not forced) uses the listing.
+                let listed = listed.remove(&path).filter(|_| !force);
                 if let Some(item) = index_one(
                     &path,
+                    listed.as_ref(),
                     force,
                     &mut cached,
                     &mut writes,
@@ -573,6 +578,7 @@ impl IndexWork {
 #[allow(clippy::too_many_arguments)]
 fn index_one(
     path: &Path,
+    listed: Option<&Fingerprint>,
     force: bool,
     cached: &mut HashMap<Vec<u8>, CachedKeywords>,
     writes: &mut Vec<(Vec<u8>, CachedKeywords)>,
@@ -585,6 +591,16 @@ fn index_one(
     let key = keyword_index::key(path);
     let result = (|| -> Result<Option<BTreeSet<String>>> {
         if !revision.is_multiple_of(2) {
+            return Ok(None);
+        }
+        // The listing matches the stored fingerprint: unchanged, no system call.
+        // (The stored value is always one read from the file itself.)
+        if !force
+            && listed.is_some_and(|l| {
+                l.reusable() && cached.get(&key).is_some_and(|row| row.stamp == *l)
+            })
+        {
+            progress.cached += 1;
             return Ok(None);
         }
         let before = Fingerprint::capture(path)?;
@@ -679,6 +695,7 @@ mod tests {
             paths: vec![],
             skipped,
             first_skipped: (skipped > 0).then(|| "locked".to_string()),
+            ..Default::default()
         };
         let mut previous = 0;
         assert_eq!(skip_change(&mut previous, &scanned(0)), None);
@@ -743,6 +760,70 @@ mod tests {
             })
             .expect("index should complete");
         (updates, complete)
+    }
+    #[test]
+    fn a_warm_reopen_checks_the_cache_against_the_listing_only() {
+        use keyword_index::CAPTURES;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("photos");
+        fs::create_dir_all(&folder).unwrap();
+        let paths: Vec<_> = ["a.bmp", "b.bmp", "c.bmp"]
+            .iter()
+            .map(|n| {
+                let p = folder.join(n);
+                image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]))
+                    .save(&p)
+                    .unwrap();
+                p
+            })
+            .collect();
+        fs::write(crate::metadata::sidecar(&paths[1]), "<x/>").unwrap();
+        // The listing gives the same fingerprints as asking each file.
+        let scanned = model::scan(&folder, false).unwrap();
+        for p in &paths {
+            assert_eq!(
+                scanned.listed[p],
+                keyword_index::Fingerprint::capture(p).unwrap(),
+                "{}",
+                p.display()
+            );
+        }
+        let database = dir.path().join("index.sqlite3");
+        let reads = Mutex::new(Vec::new());
+        let read = |p: &Path| {
+            reads.lock().unwrap().push(p.to_path_buf());
+            Ok(BTreeSet::new())
+        };
+        let (_, cold) = run_once(&folder, &database, read);
+        assert_eq!(cold.read, 3);
+        // Unchanged: no file asked, nothing read.
+        let reopen = |expect_reads: &[&PathBuf]| {
+            reads.lock().unwrap().clear();
+            CAPTURES.with(|c| c.set(0));
+            let (_, progress) = run_once(&folder, &database, read);
+            let mut got = reads.lock().unwrap().clone();
+            got.sort();
+            let mut want: Vec<PathBuf> = expect_reads.iter().map(|p| (*p).clone()).collect();
+            want.sort();
+            assert_eq!(got, want);
+            (progress, CAPTURES.with(|c| c.get()))
+        };
+        let (progress, captures) = reopen(&[]);
+        assert_eq!((progress.read, progress.cached, captures), (0, 3, 0));
+        // One image changed: only it is asked (before and after its read).
+        image::RgbImage::from_pixel(9, 9, image::Rgb([4, 5, 6]))
+            .save(&paths[0])
+            .unwrap();
+        let (progress, captures) = reopen(&[&paths[0]]);
+        assert_eq!((progress.read, captures), (1, 2));
+        // A sidecar added, changed and removed: each found on reopen.
+        fs::write(crate::metadata::sidecar(&paths[2]), "<x/>").unwrap();
+        assert_eq!(reopen(&[&paths[2]]).0.read, 1);
+        fs::write(crate::metadata::sidecar(&paths[2]), "<longer/>").unwrap();
+        assert_eq!(reopen(&[&paths[2]]).0.read, 1);
+        fs::remove_file(crate::metadata::sidecar(&paths[1])).unwrap();
+        assert_eq!(reopen(&[&paths[1]]).0.read, 1);
+        assert_eq!(reopen(&[]).1, 0);
     }
     #[test]
     fn keywords_indexed_by_the_folder_watcher_with_subfolders_are_reused() {

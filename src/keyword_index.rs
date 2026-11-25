@@ -15,19 +15,21 @@ struct FileStamp {
     modified: Option<String>,
 }
 impl FileStamp {
-    fn from_metadata(metadata: fs::Metadata) -> Self {
-        let modified = metadata
-            .modified()
-            .ok()
-            .map(|time| match time.duration_since(UNIX_EPOCH) {
-                Ok(d) => d.as_nanos().to_string(),
-                Err(e) => format!("-{}", e.duration().as_nanos()),
-            });
-        Self {
-            len: metadata.len(),
-            modified,
-        }
+    fn new(len: u64, modified: Option<std::time::SystemTime>) -> Self {
+        let modified = modified.map(|time| match time.duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_nanos().to_string(),
+            Err(e) => format!("-{}", e.duration().as_nanos()),
+        });
+        Self { len, modified }
     }
+    fn from_metadata(metadata: fs::Metadata) -> Self {
+        Self::new(metadata.len(), metadata.modified().ok())
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// `Fingerprint::capture` calls on this thread (tests).
+    pub static CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint {
@@ -36,6 +38,8 @@ pub struct Fingerprint {
 }
 impl Fingerprint {
     pub fn capture(path: &Path) -> Result<Self> {
+        #[cfg(test)]
+        CAPTURES.with(|c| c.set(c.get() + 1));
         let image = FileStamp::from_metadata(fs::metadata(path)?);
         let sidecar = match fs::metadata(crate::metadata::sidecar(path)) {
             Ok(m) => Some(FileStamp::from_metadata(m)),
@@ -43,6 +47,15 @@ impl Fingerprint {
             Err(e) => return Err(e.into()),
         };
         Ok(Self { image, sidecar })
+    }
+    /// The fingerprint as the directory listing gave it (no system call of
+    /// its own). Only compared with stored fingerprints, never stored: an
+    /// entry may lag behind a file another program still has open.
+    pub fn listed(image: crate::model::Listed, sidecar: Option<crate::model::Listed>) -> Self {
+        Self {
+            image: FileStamp::new(image.len, image.modified),
+            sidecar: sidecar.map(|s| FileStamp::new(s.len, s.modified)),
+        }
     }
     pub fn reusable(&self) -> bool {
         self.image.modified.is_some() && self.sidecar.as_ref().is_none_or(|s| s.modified.is_some())

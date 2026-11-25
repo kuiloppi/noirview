@@ -1734,21 +1734,28 @@ pub fn supported(path: &Path) -> bool {
         })
         .unwrap_or(false)
 }
+/// Size and modification time as the directory listing gives them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Listed {
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
 /// One entry of a folder walk.
 pub enum ScanEntry {
-    File(PathBuf),
+    /// A file, with its size and time when the listing had them.
+    File(PathBuf, Option<Listed>),
     /// A folder or anything else that is not an image file.
     Other,
     /// An entry that could not be read; depth 0 is the opened folder itself.
-    Failed {
-        depth: usize,
-        message: String,
-    },
+    Failed { depth: usize, message: String },
 }
 /// The images of a folder (sorted by path) and what could not be read.
 #[derive(Debug, Default, PartialEq)]
 pub struct Scanned {
     pub paths: Vec<PathBuf>,
+    /// Each image's fingerprint (with its `.xmp` sidecar) from the listing,
+    /// for checking the keyword cache without asking the file system again.
+    pub listed: HashMap<PathBuf, crate::keyword_index::Fingerprint>,
     /// Entries below the opened folder that could not be read and were skipped.
     pub skipped: usize,
     pub first_skipped: Option<String>,
@@ -1771,7 +1778,18 @@ pub fn scan(folder: &Path, recursive: bool) -> anyhow::Result<Scanned> {
         .max_depth(if recursive { usize::MAX } else { 1 })
         .into_iter()
         .map(|item| match item {
-            Ok(e) if e.file_type().is_file() => ScanEntry::File(e.into_path()),
+            Ok(e) if e.file_type().is_file() => {
+                // On Windows the listing carries size and time already;
+                // elsewhere asking here would only delay the file list.
+                let listed = LISTING_HAS_METADATA
+                    .then(|| e.metadata().ok())
+                    .flatten()
+                    .map(|m| Listed {
+                        len: m.len(),
+                        modified: m.modified().ok(),
+                    });
+                ScanEntry::File(e.into_path(), listed)
+            }
             Ok(_) => ScanEntry::Other,
             Err(e) => ScanEntry::Failed {
                 depth: e.depth(),
@@ -1785,10 +1803,18 @@ pub fn scan(folder: &Path, recursive: bool) -> anyhow::Result<Scanned> {
 /// error.
 pub fn collect_scan(entries: impl IntoIterator<Item = ScanEntry>) -> anyhow::Result<Scanned> {
     let mut scanned = Scanned::default();
+    let mut stamps = Vec::new();
+    let mut sidecars = HashMap::new();
     for entry in entries {
         match entry {
-            ScanEntry::File(path) if supported(&path) => scanned.paths.push(path),
-            ScanEntry::File(_) | ScanEntry::Other => {}
+            ScanEntry::File(path, listed) if supported(&path) => {
+                stamps.push(listed);
+                scanned.paths.push(path);
+            }
+            ScanEntry::File(path, Some(listed)) if is_sidecar(&path) => {
+                sidecars.insert(listing_key(&path), listed);
+            }
+            ScanEntry::File(..) | ScanEntry::Other => {}
             ScanEntry::Failed { depth: 0, message } => anyhow::bail!(message),
             ScanEntry::Failed { message, .. } => {
                 scanned.skipped += 1;
@@ -1796,10 +1822,36 @@ pub fn collect_scan(entries: impl IntoIterator<Item = ScanEntry>) -> anyhow::Res
             }
         }
     }
+    for (path, listed) in scanned.paths.iter().zip(stamps) {
+        if let Some(listed) = listed {
+            let sidecar = sidecars
+                .get(&listing_key(&crate::metadata::sidecar(path)))
+                .copied();
+            scanned.listed.insert(
+                path.clone(),
+                crate::keyword_index::Fingerprint::listed(listed, sidecar),
+            );
+        }
+    }
     scanned
         .paths
         .sort_by_cached_key(|p| p.to_string_lossy().to_lowercase());
     Ok(scanned)
+}
+/// Whether the directory listing gives size and time without a system call
+/// per file (Windows); tests use it everywhere.
+const LISTING_HAS_METADATA: bool = cfg!(any(windows, test));
+fn is_sidecar(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+}
+/// A path as the file system compares it: Windows ignores case.
+fn listing_key(path: &Path) -> std::ffi::OsString {
+    if cfg!(windows) {
+        path.to_string_lossy().to_lowercase().into()
+    } else {
+        path.as_os_str().to_owned()
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1807,7 +1859,7 @@ mod tests {
     use std::collections::HashSet;
     #[test]
     fn a_scan_skips_unreadable_entries_below_the_folder_and_fails_on_the_folder() {
-        let file = |name: &str| ScanEntry::File(PathBuf::from(name));
+        let file = |name: &str| ScanEntry::File(PathBuf::from(name), None);
         let failed = |depth: usize, message: &str| ScanEntry::Failed {
             depth,
             message: message.into(),
