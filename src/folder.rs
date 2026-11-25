@@ -363,9 +363,31 @@ fn run(
             return;
         }
     }
-    if !send_identities(&files, revisions, current, send) {
+    // Identities: remembered ones are used while the file is unchanged by
+    // size, modification and creation time; the rest are captured and kept.
+    let mut observed = index
+        .as_ref()
+        .and_then(|db| {
+            db.remembered_identities(&folder, recursive, &listed, &created)
+                .ok()
+        })
+        .unwrap_or_default();
+    let mut captured = Vec::new();
+    if !send_identities(
+        &files,
+        &mut observed,
+        &|_| false,
+        &mut captured,
+        revisions,
+        current,
+        send,
+    ) {
         return;
     }
+    // Stored when the pass ends (one write): reading a changed file's keywords
+    // updates its file state, which would clear an identity stored earlier.
+    // An interrupted pass only means capturing them again next time.
+    let mut identities_this_pass = std::mem::take(&mut captured);
     let mut work = IndexWork::default();
     for path in &files {
         work.schedule(path.clone(), force, false);
@@ -402,6 +424,10 @@ fn run(
             let before = work.pending.len();
             let identity_dirty =
                 incoming.rescan || incoming.refresh_all || !incoming.dirty.is_empty();
+            // Only changed files are opened again for their identity (new
+            // files have none yet); a lost-event refresh opens every file.
+            let refresh_all = incoming.refresh_all;
+            let changed: HashSet<PathBuf> = incoming.dirty.iter().cloned().collect();
             if incoming.rescan {
                 match model::scan(&folder, recursive) {
                     Ok(scanned) => {
@@ -453,8 +479,20 @@ fn run(
                 }
             }
             progress.total += work.pending.len().saturating_sub(before);
-            if identity_dirty && !send_identities(&files, revisions, current, send) {
-                return;
+            if identity_dirty {
+                let mut captured = Vec::new();
+                if !send_identities(
+                    &files,
+                    &mut observed,
+                    &|path| refresh_all || changed.contains(path),
+                    &mut captured,
+                    revisions,
+                    current,
+                    send,
+                ) {
+                    return;
+                }
+                identities_this_pass.append(&mut captured);
             }
             if !send(Update::Progress(progress)) {
                 return;
@@ -501,12 +539,14 @@ fn run(
         }
         if indexing {
             flush(&mut index, &folder, recursive, &mut writes, send);
-            // The pass is over: the gathered rows go to disk in one write.
+            // The pass is over: the gathered rows go to disk in one write,
+            // then this pass's identities (their file state is now current).
             if let Some(Err(e)) = index.as_ref().map(KeywordIndex::finish) {
                 send(Update::Warning(format!(
                     "Keyword index could not be saved: {e:#}"
                 )));
             }
+            remember(&index, &std::mem::take(&mut identities_this_pass));
             if !entries.is_empty() && !send(Update::Keywords(std::mem::take(&mut entries))) {
                 return;
             }
@@ -521,8 +561,22 @@ fn run(
         }
     }
 }
+/// Keep captured identities in the catalog for the next open.
+fn remember(index: &Option<KeywordIndex>, captured: &[(PathBuf, Option<String>)]) {
+    if let Some(db) = index {
+        let _ = db.remember_identities(captured);
+    }
+}
+/// Send the identity snapshot of `files`. `observed` holds the latest
+/// identity of each file (remembered from the catalog at the first open, then
+/// kept here): a file is opened again only when it has none or `recapture`
+/// says it changed. What was captured is added to `captured`; files no longer
+/// listed are forgotten.
 fn send_identities(
     files: &[PathBuf],
+    observed: &mut HashMap<PathBuf, Option<String>>,
+    recapture: &dyn Fn(&Path) -> bool,
+    captured: &mut Vec<(PathBuf, Option<String>)>,
     revisions: &Revisions,
     current: &impl Fn() -> bool,
     send: &impl Fn(Update) -> bool,
@@ -536,12 +590,22 @@ fn send_identities(
         if !current() {
             return false;
         }
-        snapshot.paths.insert(
-            path.clone(),
-            crate::identity::Observation {
-                identity: crate::identity::capture(path),
-            },
-        );
+        let identity = match observed.get(path) {
+            Some(identity) if !recapture(path) => identity.clone(),
+            _ => {
+                let identity = crate::identity::capture(path);
+                observed.insert(path.clone(), identity.clone());
+                captured.push((path.clone(), identity.clone()));
+                identity
+            }
+        };
+        snapshot
+            .paths
+            .insert(path.clone(), crate::identity::Observation { identity });
+    }
+    if observed.len() > files.len() {
+        let listed: HashSet<&PathBuf> = files.iter().collect();
+        observed.retain(|path, _| listed.contains(path));
     }
     if serial != revisions.0.lock().unwrap().serial {
         return true;
@@ -770,6 +834,119 @@ mod tests {
             })
             .expect("index should complete");
         (updates, complete)
+    }
+    #[test]
+    fn identities_are_remembered_while_files_are_unchanged() {
+        use crate::identity::CAPTURES;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("photos");
+        fs::create_dir_all(&folder).unwrap();
+        let bmp = |p: &Path, side: u32| {
+            image::RgbImage::from_pixel(side, side, image::Rgb([1, 2, 3]))
+                .save(p)
+                .unwrap()
+        };
+        let paths: Vec<_> = ["a.bmp", "b.bmp", "c.bmp"]
+            .iter()
+            .map(|n| folder.join(n))
+            .collect();
+        for p in &paths {
+            bmp(p, 8);
+        }
+        let database = dir.path().join("index.sqlite3");
+        let open = || {
+            CAPTURES.with(|c| c.set(0));
+            let (updates, _) = run_once(&folder, &database, |_| Ok(BTreeSet::new()));
+            let snapshot = updates
+                .iter()
+                .find_map(|u| match u {
+                    Update::Identities(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .expect("an identity snapshot");
+            (CAPTURES.with(|c| c.get()), snapshot)
+        };
+        // First open: every file; second, unchanged: none, with the same identities.
+        let (captures, first) = open();
+        assert_eq!(captures, 3);
+        let (captures, second) = open();
+        assert_eq!(captures, 0);
+        for p in &paths {
+            assert_eq!(first.paths[p].identity, second.paths[p].identity);
+            assert!(second.paths[p].identity.is_some());
+        }
+        // A file replaced by one of another size: opened again.
+        let replacement = dir.path().join("other.bmp");
+        bmp(&replacement, 9);
+        fs::rename(&replacement, &paths[0]).unwrap();
+        let (captures, third) = open();
+        assert_eq!(captures, 1);
+        assert_eq!(
+            third.paths[&paths[0]].identity,
+            crate::identity::capture(&paths[0])
+        );
+        // A new file: captured once, then remembered.
+        let added = folder.join("d.bmp");
+        bmp(&added, 8);
+        assert_eq!(open().0, 1);
+        assert_eq!(open().0, 0);
+    }
+    #[test]
+    fn after_changes_only_changed_and_new_files_are_opened_again() {
+        use crate::identity::CAPTURES;
+        let dir = tempfile::tempdir().unwrap();
+        let mut files: Vec<PathBuf> = (0..100)
+            .map(|i| {
+                let p = dir.path().join(format!("{i:03}.bin"));
+                fs::write(&p, [i as u8]).unwrap();
+                p
+            })
+            .collect();
+        let revisions = Revisions::default();
+        let last = Mutex::new(None);
+        let send = |u: Update| {
+            if let Update::Identities(s) = u {
+                *last.lock().unwrap() = Some(s);
+            }
+            true
+        };
+        let mut observed = HashMap::new();
+        let snapshot = |files: &[PathBuf],
+                        observed: &mut HashMap<PathBuf, Option<String>>,
+                        recapture: &dyn Fn(&Path) -> bool| {
+            CAPTURES.with(|c| c.set(0));
+            let mut captured = Vec::new();
+            assert!(send_identities(
+                files,
+                observed,
+                recapture,
+                &mut captured,
+                &revisions,
+                &|| true,
+                &send
+            ));
+            assert_eq!(captured.len(), CAPTURES.with(|c| c.get()));
+            CAPTURES.with(|c| c.get())
+        };
+        assert_eq!(snapshot(&files, &mut observed, &|_| false), 100);
+        // One dirty path: one capture.
+        let dirty = files[42].clone();
+        assert_eq!(snapshot(&files, &mut observed, &|p| p == dirty), 1);
+        // A rescan adding two files: two.
+        for name in ["new-a.bin", "new-b.bin"] {
+            let p = dir.path().join(name);
+            fs::write(&p, b"n").unwrap();
+            files.push(p);
+        }
+        assert_eq!(snapshot(&files, &mut observed, &|_| false), 2);
+        // Lost events (refresh all): every file.
+        assert_eq!(snapshot(&files, &mut observed, &|_| true), 102);
+        // A removed path is gone from the next snapshot and from memory.
+        let removed = files.remove(0);
+        assert_eq!(snapshot(&files, &mut observed, &|_| false), 0);
+        let sent = last.lock().unwrap().clone().unwrap();
+        assert!(!sent.paths.contains_key(&removed) && !observed.contains_key(&removed));
+        assert_eq!(sent.paths.len(), 101);
     }
     #[test]
     fn a_warm_reopen_checks_the_cache_against_the_listing_only() {

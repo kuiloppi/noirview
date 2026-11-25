@@ -251,6 +251,45 @@ impl KeywordIndex {
             .borrow_mut()
             .reconcile_listing(folder, depth(recursive), &listed)
     }
+    /// Identities that can be used without opening the file again: the
+    /// stored identity of an image whose listed size and modification time
+    /// equal the catalogued ones and whose listed creation time is the one the
+    /// identity ends with. (A file replaced by another with all three equal
+    /// would keep the old identity until it changes; accepted trade-off.)
+    pub fn remembered_identities(
+        &self,
+        folder: &Path,
+        recursive: bool,
+        listed: &HashMap<std::path::PathBuf, Fingerprint>,
+        created: &HashMap<std::path::PathBuf, std::time::SystemTime>,
+    ) -> Result<HashMap<std::path::PathBuf, Option<String>>> {
+        self.write_pending()?;
+        let stored = self.catalog.borrow().identities(folder, depth(recursive))?;
+        let mut reuse = HashMap::new();
+        for (path, fingerprint) in listed {
+            let Some((identity, stamp)) = stored.get(&key(path)) else {
+                continue;
+            };
+            let now = fingerprint.to_entry(BTreeSet::new()).image;
+            let born = created.get(path).and_then(|t| crate::catalog::nanos(*t));
+            if now.modified_ns.is_some()
+                && now == *stamp
+                && born.is_some_and(|b| identity.rsplit(':').next() == Some(b.to_string().as_str()))
+            {
+                reuse.insert(path.clone(), Some(identity.clone()));
+            }
+        }
+        Ok(reuse)
+    }
+    /// Store identities just captured (one transaction).
+    pub fn remember_identities(&self, rows: &[(std::path::PathBuf, Option<String>)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.write_pending()?;
+        self.catalog.borrow_mut().set_identities(rows)?;
+        Ok(())
+    }
     pub fn remove(&self, _folder: &Path, _recursive: bool, path: &Path) -> Result<()> {
         self.write_pending()?;
         self.catalog.borrow_mut().remove(path)?;

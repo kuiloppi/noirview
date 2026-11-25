@@ -224,6 +224,7 @@ mod tests {
         let waiting = std::thread::spawn(move || {
             waiting_turn.read(&path, 100, || false, || flag.load(Ordering::Relaxed))
         });
+        // Still waiting while the turn is held (it can only finish by being cancelled).
         std::thread::sleep(Duration::from_millis(60));
         assert!(!waiting.is_finished());
         cancelled.store(true, Ordering::Relaxed);
@@ -243,7 +244,13 @@ mod tests {
         let background = spawn("background", false);
         std::thread::sleep(Duration::from_millis(40));
         let urgent = spawn("urgent", true);
-        std::thread::sleep(Duration::from_millis(40));
+        // Until the urgent read is queued (not a fixed sleep: a loaded machine
+        // may start the thread late).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while turn.lock().urgent_waiting == 0 {
+            assert!(Instant::now() < deadline, "the urgent read never queued");
+            std::thread::sleep(Duration::from_millis(2));
+        }
         {
             let mut state = turn.lock();
             assert_eq!(state.urgent_waiting, 1);

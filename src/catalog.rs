@@ -256,7 +256,10 @@ impl Catalog {
             let mut upsert = tx.prepare_cached(
                 "INSERT INTO images(folder,name,size,modified,sidecar_size,sidecar_modified,keywords_current,tags)
                 VALUES(?1,?2,?3,?4,?5,?6,1,?7)
-                ON CONFLICT(folder,name) DO UPDATE SET size=excluded.size,modified=excluded.modified,
+                ON CONFLICT(folder,name) DO UPDATE SET
+                    identity=CASE WHEN size=excluded.size AND modified IS excluded.modified
+                        THEN identity END,
+                    size=excluded.size,modified=excluded.modified,
                     sidecar_size=excluded.sidecar_size,sidecar_modified=excluded.sidecar_modified,
                     keywords_current=1,tags=excluded.tags
                 RETURNING id",
@@ -638,6 +641,53 @@ impl Catalog {
                 (SELECT 1 FROM image_keywords WHERE keyword=keywords.id)",
             [],
         )?)
+    }
+    /// The remembered file identities of the scope with the file state they
+    /// belong to (an identity is cleared when that state changes).
+    pub fn identities(
+        &self,
+        folder: &Path,
+        depth: Depth,
+    ) -> Result<HashMap<Vec<u8>, (String, Stamp)>> {
+        let mut found = HashMap::new();
+        let mut query = self.connection.prepare_cached(
+            "SELECT name,identity,size,modified FROM images
+            WHERE folder=?1 AND identity IS NOT NULL",
+        )?;
+        for (id, path) in self.folders(folder, depth)? {
+            let mut rows = query.query([id])?;
+            while let Some(row) = rows.next()? {
+                found.insert(
+                    join(&path, &row.get::<_, Vec<u8>>(0)?),
+                    (
+                        row.get(1)?,
+                        Stamp {
+                            size: row.get::<_, i64>(2)? as u64,
+                            modified_ns: row.get(3)?,
+                        },
+                    ),
+                );
+            }
+        }
+        Ok(found)
+    }
+    /// Remember identities (or forget them, `None`) in one transaction.
+    /// Returns how many rows existed to take them.
+    pub fn set_identities(&mut self, rows: &[(PathBuf, Option<String>)]) -> Result<usize> {
+        let tx = self.connection.transaction()?;
+        let mut changed = 0;
+        {
+            let mut update = tx.prepare_cached(
+                "UPDATE images SET identity=?3
+                WHERE name=?2 AND folder=(SELECT id FROM folders WHERE path=?1)",
+            )?;
+            for (path, identity) in rows {
+                let (folder, name) = split(path)?;
+                changed += update.execute(params![folder, name, identity])?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
     }
     pub fn set_identity(&mut self, path: &Path, identity: Option<&str>) -> Result<bool> {
         let (folder, name) = split(path)?;
@@ -1138,6 +1188,30 @@ mod tests {
             .query_row("SELECT created FROM images", [], |r| r.get(0))
             .unwrap();
         assert_eq!(created, None);
+    }
+    #[test]
+    fn identities_are_remembered_and_dropped_when_the_file_state_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = catalog(dir.path());
+        let folder = dir.path().join("photos");
+        let (a, b) = (folder.join("a.jpg"), folder.join("b.jpg"));
+        c.store(&[(a.clone(), entry(1, &[])), (b.clone(), entry(2, &[]))])
+            .unwrap();
+        let rows = vec![
+            (a.clone(), Some("unix:1:2:3".to_string())),
+            (b.clone(), Some("unix:1:4:5".to_string())),
+            (folder.join("missing.jpg"), Some("x".to_string())),
+        ];
+        assert_eq!(c.set_identities(&rows).unwrap(), 2);
+        let ids = c.identities(&folder, Depth::Children).unwrap();
+        assert_eq!(ids[&key(&a)].0, "unix:1:2:3");
+        assert_eq!(ids[&key(&a)].1, entry(1, &[]).image);
+        // The same file state stored again keeps the identity; another one
+        // (read by someone who did not capture it) drops it.
+        c.store(&[(a.clone(), entry(1, &["k"])), (b.clone(), entry(9, &[]))])
+            .unwrap();
+        let ids = c.identities(&folder, Depth::Children).unwrap();
+        assert!(ids.contains_key(&key(&a)) && !ids.contains_key(&key(&b)));
     }
     #[test]
     fn a_desynchronised_catalog_is_reported_exactly() {

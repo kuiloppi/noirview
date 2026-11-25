@@ -9,7 +9,14 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+#[cfg(test)]
+thread_local! {
+    /// `capture` calls on this thread (tests).
+    pub static CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 pub fn capture(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    CAPTURES.with(|c| c.set(c.get() + 1));
     // Do not assign ownership through file symlinks or multiply linked files.
     if fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
         return None;

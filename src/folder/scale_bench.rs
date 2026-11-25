@@ -119,8 +119,12 @@ fn scale_bench_folder_open() {
         let before = bench::live();
         let started = Instant::now();
         let kept = Mutex::new(None);
+        // A first open with nothing remembered: every file is opened.
         assert!(send_identities(
             &files,
+            &mut HashMap::new(),
+            &|_| false,
+            &mut Vec::new(),
             &Revisions::default(),
             &|| true,
             &|update| {
