@@ -1,4 +1,5 @@
-//! Rebuildable catalog of folders and images. Not wired into the program yet.
+//! Rebuildable catalog of folders and images. The keyword cache stores its rows
+//! here (`keyword_index.rs`).
 //!
 //! One row per folder and one per image, with integer ids. An image's path is its
 //! folder's path plus its file name, so the folder prefix is stored once. Keywords
@@ -187,6 +188,23 @@ impl Catalog {
             connection,
             keyword_ids: HashMap::new(),
         })
+    }
+    /// A stored fact (small values kept with the catalog).
+    pub fn fact(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row("SELECT value FROM facts WHERE name=?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+    pub fn set_fact(&mut self, name: &str, value: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO facts(name,value) VALUES(?1,?2)
+            ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+            [name, value],
+        )?;
+        Ok(())
     }
     /// Record the metadata-reader revision. When it differs from the stored one,
     /// every image keeps its row and id but its keywords count as unread.
@@ -383,6 +401,41 @@ impl Catalog {
         }
         Ok(found)
     }
+    /// For a consistency check: every image in the scope with current
+    /// keywords, its `tags` text and its keyword relation (read only).
+    pub fn tag_rows(&self, folder: &Path, depth: Depth) -> Result<TagRows> {
+        let mut found = HashMap::new();
+        for (id, path) in self.folders(folder, depth)? {
+            let mut names = HashMap::new();
+            let mut images = self.connection.prepare_cached(
+                "SELECT id,name,tags FROM images WHERE folder=?1 AND keywords_current=1",
+            )?;
+            let mut rows = images.query([id])?;
+            while let Some(row) = rows.next()? {
+                let full = join(&path, &row.get::<_, Vec<u8>>(1)?);
+                names.insert(row.get::<_, i64>(0)?, full.clone());
+                found.insert(
+                    full,
+                    (decode_tags(&row.get::<_, String>(2)?)?, BTreeSet::new()),
+                );
+            }
+            let mut relation = self.connection.prepare_cached(
+                "SELECT ik.image,k.keyword FROM image_keywords ik
+                JOIN keywords k ON k.id=ik.keyword JOIN images i ON i.id=ik.image
+                WHERE i.folder=?1 AND i.keywords_current=1",
+            )?;
+            let mut rows = relation.query([id])?;
+            while let Some(row) = rows.next()? {
+                if let Some(entry) = names
+                    .get(&row.get::<_, i64>(0)?)
+                    .and_then(|full| found.get_mut(full))
+                {
+                    entry.1.insert(row.get(1)?);
+                }
+            }
+        }
+        Ok(found)
+    }
     /// One image with current keywords, or `None`.
     pub fn get(&self, path: &Path) -> Result<Option<Entry>> {
         let (folder, name) = split(path)?;
@@ -560,6 +613,114 @@ impl Catalog {
             self.store(batch)?;
         }
         Ok(rows.len())
+    }
+}
+
+/// Per image (full-path bytes): its keyword text and its keyword relation.
+pub type TagRows = HashMap<Vec<u8>, (BTreeSet<String>, BTreeSet<String>)>;
+/// What a consistency check found (`Settings → Folders & tags`).
+#[derive(Debug, Default, PartialEq)]
+pub struct Check {
+    pub images: usize,
+    /// Keywords shown in NoirView differ from the catalog's.
+    pub shown_differs: Vec<(PathBuf, BTreeSet<String>, BTreeSet<String>)>,
+    /// The catalog's keyword text and keyword relation disagree.
+    pub relation_differs: Vec<PathBuf>,
+    /// In the folder's list, not (or not yet) in the catalog.
+    pub missing: Vec<PathBuf>,
+    /// In the catalog, not in the folder's list.
+    pub extra: Vec<PathBuf>,
+}
+impl Check {
+    /// Compares the folder's images and their shown keywords with the
+    /// catalog's rows. Changes nothing.
+    pub fn compare(files: &[(PathBuf, BTreeSet<String>)], mut rows: TagRows) -> Self {
+        let mut check = Self {
+            images: files.len(),
+            ..Self::default()
+        };
+        for (path, shown) in files {
+            match rows.remove(&key(path)) {
+                None => check.missing.push(path.clone()),
+                Some((tags, relation)) => {
+                    if &tags != shown {
+                        check
+                            .shown_differs
+                            .push((path.clone(), shown.clone(), tags.clone()));
+                    }
+                    if tags != relation {
+                        check.relation_differs.push(path.clone());
+                    }
+                }
+            }
+        }
+        check.extra = rows.into_keys().map(path_of).collect();
+        check.extra.sort();
+        check
+    }
+    pub fn is_clean(&self) -> bool {
+        self.shown_differs.is_empty()
+            && self.relation_differs.is_empty()
+            && self.missing.is_empty()
+            && self.extra.is_empty()
+    }
+    /// A short report with the first few differences of each kind.
+    pub fn report(&self) -> String {
+        let mut text = format!(
+            "{} image(s) checked.\nKeywords shown ≠ catalog: {}\nCatalog keywords ≠ keyword relation: {}\nNot in the catalog: {}\nIn the catalog, not in the folder: {}",
+            self.images,
+            self.shown_differs.len(),
+            self.relation_differs.len(),
+            self.missing.len(),
+            self.extra.len()
+        );
+        let name = |p: &PathBuf| p.display().to_string();
+        let list = |text: &mut String, title: &str, items: Vec<String>| {
+            if !items.is_empty() {
+                text.push_str(&format!("\n\n{title}:"));
+                for item in items.iter().take(5) {
+                    text.push_str(&format!("\n  {item}"));
+                }
+                if items.len() > 5 {
+                    text.push_str(&format!("\n  … and {} more", items.len() - 5));
+                }
+            }
+        };
+        let tags = |t: &BTreeSet<String>| t.iter().cloned().collect::<Vec<_>>().join(", ");
+        list(
+            &mut text,
+            "Keywords shown ≠ catalog",
+            self.shown_differs
+                .iter()
+                .map(|(p, shown, tags_)| {
+                    format!(
+                        "{} — shown [{}], catalog [{}]",
+                        name(p),
+                        tags(shown),
+                        tags(tags_)
+                    )
+                })
+                .collect(),
+        );
+        list(
+            &mut text,
+            "Catalog keywords ≠ keyword relation",
+            self.relation_differs.iter().map(name).collect(),
+        );
+        list(
+            &mut text,
+            "Not in the catalog",
+            self.missing.iter().map(name).collect(),
+        );
+        list(
+            &mut text,
+            "In the catalog, not in the folder",
+            self.extra.iter().map(name).collect(),
+        );
+        if self.is_clean() {
+            text.push_str("\n\nNo differences.");
+        }
+        text
     }
 }
 
@@ -752,8 +913,57 @@ mod tests {
         assert_eq!(identity.as_deref(), Some("unix:1:2:3"));
     }
     #[test]
+    fn a_desynchronised_catalog_is_reported_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = catalog(dir.path());
+        let folder = dir.path().join("photos");
+        let path = |n: &str| folder.join(n);
+        c.store(&[
+            (path("same.jpg"), entry(1, &["a", "b"])),
+            (path("differs.jpg"), entry(2, &["old"])),
+            (path("broken.jpg"), entry(3, &["x"])),
+            (path("extra.jpg"), entry(4, &[])),
+        ])
+        .unwrap();
+        // The keyword relation of one image no longer matches its text.
+        c.connection
+            .execute(
+                "DELETE FROM image_keywords WHERE image=(SELECT id FROM images WHERE name=?1)",
+                [b"broken.jpg".as_slice()],
+            )
+            .unwrap();
+        let set = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let files = vec![
+            (path("same.jpg"), set(&["a", "b"])),
+            (path("differs.jpg"), set(&["new"])),
+            (path("broken.jpg"), set(&["x"])),
+            (path("missing.jpg"), set(&[])),
+        ];
+        let check = Check::compare(&files, c.tag_rows(&folder, Depth::Children).unwrap());
+        assert_eq!(
+            check,
+            Check {
+                images: 4,
+                shown_differs: vec![(path("differs.jpg"), set(&["new"]), set(&["old"]))],
+                relation_differs: vec![path("broken.jpg")],
+                missing: vec![path("missing.jpg")],
+                extra: vec![path("extra.jpg")],
+            }
+        );
+        let report = check.report();
+        assert!(report.contains("4 image(s) checked"));
+        assert!(report.contains("differs.jpg — shown [new], catalog [old]"));
+        assert!(!check.is_clean());
+        // In agreement: clean.
+        let agree = vec![(path("same.jpg"), set(&["a", "b"]))];
+        let mut rows = c.tag_rows(&folder, Depth::Children).unwrap();
+        rows.retain(|k, _| *k == key(&path("same.jpg")));
+        let clean = Check::compare(&agree, rows);
+        assert!(clean.is_clean() && clean.report().ends_with("No differences."));
+    }
+    #[test]
     fn rows_of_the_existing_keyword_index_import_with_matching_stamps() {
-        use crate::keyword_index::{CachedKeywords, Fingerprint, KeywordIndex};
+        use crate::keyword_index::{CachedKeywords, Fingerprint};
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("photos");
         fs::create_dir_all(&folder).unwrap();
@@ -764,22 +974,36 @@ mod tests {
         fs::write(&sidecar, b"xmp").unwrap();
         let old = dir.path().join("keyword-index.sqlite3");
         {
-            let mut index = KeywordIndex::open(&old).unwrap();
-            let rows: Vec<_> = [&plain, &with_sidecar]
-                .iter()
-                .map(|p| {
-                    (
-                        crate::keyword_index::key(p),
-                        CachedKeywords {
-                            stamp: Fingerprint::capture(p).unwrap(),
-                            tags: BTreeSet::from(["moss".to_string()]),
-                        },
-                    )
-                })
-                .collect();
+            // The keyword index as NoirView before 0.1.79 wrote it.
+            let c = Connection::open(&old).unwrap();
+            c.execute_batch(
+                "CREATE TABLE keyword_index (folder BLOB NOT NULL, recursive INTEGER NOT NULL,
+                    path BLOB NOT NULL, stamp TEXT NOT NULL, tags TEXT NOT NULL,
+                    PRIMARY KEY(folder,recursive,path)) WITHOUT ROWID;
+                CREATE TABLE reader_revision (revision INTEGER NOT NULL);
+                INSERT INTO reader_revision VALUES(3); PRAGMA user_version=1;",
+            )
+            .unwrap();
             // The same files under two scopes, as the viewer and the watcher store them.
-            index.store(&folder, false, &rows).unwrap();
-            index.store(dir.path(), true, &rows).unwrap();
+            for (scope, recursive) in [(&folder, false), (&dir.path().to_path_buf(), true)] {
+                for p in [&plain, &with_sidecar] {
+                    let row = CachedKeywords {
+                        stamp: Fingerprint::capture(p).unwrap(),
+                        tags: BTreeSet::from(["moss".to_string()]),
+                    };
+                    c.execute(
+                        "INSERT INTO keyword_index VALUES(?1,?2,?3,?4,?5)",
+                        params![
+                            key(scope),
+                            recursive,
+                            key(p),
+                            serde_json::to_string(&row.stamp).unwrap(),
+                            serde_json::to_string(&row.tags).unwrap()
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
         }
         let mut c = catalog(dir.path());
         assert_eq!(c.import_keyword_index(&old, 2).unwrap(), 0);

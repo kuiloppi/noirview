@@ -497,6 +497,12 @@ fn run(
         }
         if indexing {
             flush(&mut index, &folder, recursive, &mut writes, send);
+            // The pass is over: the gathered rows go to disk in one write.
+            if let Some(Err(e)) = index.as_ref().map(KeywordIndex::finish) {
+                send(Update::Warning(format!(
+                    "Keyword index could not be saved: {e:#}"
+                )));
+            }
             if !entries.is_empty() && !send(Update::Keywords(std::mem::take(&mut entries))) {
                 return;
             }

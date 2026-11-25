@@ -323,6 +323,8 @@ enum Event {
     Recovered(Result<Vec<(PathBuf, PathBuf)>, String>),
     /// Files sorted by a metadata key on a worker: (request, files).
     Sorted(u64, Vec<PathBuf>),
+    /// The keyword index check's report (Settings → Folders & tags).
+    IndexChecked(Result<String, String>),
 }
 /// Page load times: until everything was on screen, and how long workers
 /// were preparing the thumbnails (also when that happened in advance).
@@ -468,6 +470,8 @@ enum Dialog {
     Rescan,
     Reindex,
     Error(String),
+    /// A report to read (title, text).
+    Report(&'static str, String),
 }
 /// What the marked images' Move grid replaced (restored on leaving it).
 struct MoveGridSaved {
@@ -3371,6 +3375,12 @@ impl Viewer {
                         }
                     }
                 }
+                Event::IndexChecked(result) => {
+                    self.dialog = Some(match result {
+                        Ok(text) => Dialog::Report("Keyword index check", text),
+                        Err(e) => Dialog::Error(format!("Keyword index check failed: {e}")),
+                    });
+                }
                 Event::Sorted(request, files) => {
                     if request == self.sort_request && files.len() == self.files.len() {
                         self.files = files;
@@ -5814,6 +5824,45 @@ impl Viewer {
         self.log_line(&format!(
             "gesture dx={dx:.0} dy={dy:.0} ms={ms} matched={matched} action={action}"
         ));
+    }
+    /// Compare the open folder's images and shown keywords with the keyword
+    /// index on a worker; the report arrives as `Event::IndexChecked`.
+    fn check_index(&mut self) {
+        let Some(folder) = self.folder.clone() else {
+            return;
+        };
+        let Some(database) = self
+            .store
+            .as_ref()
+            .and_then(|s| s.path.parent())
+            .map(|p| p.join("keyword-index.sqlite3"))
+        else {
+            self.dialog = Some(Dialog::Error(
+                "No data folder: the keyword index is not in use.".into(),
+            ));
+            return;
+        };
+        let files: Vec<(PathBuf, BTreeSet<String>)> = self
+            .files
+            .iter()
+            .map(|p| {
+                let tags = self
+                    .lib
+                    .photos
+                    .get(p)
+                    .map(|m| m.tags.clone())
+                    .unwrap_or_default();
+                (p.clone(), tags)
+            })
+            .collect();
+        let (recursive, tx) = (self.lib.settings.recursive, self.tx.clone());
+        std::thread::spawn(move || {
+            let result = crate::keyword_index::KeywordIndex::open(&database)
+                .and_then(|index| index.check(&folder, recursive, &files))
+                .map(|check| check.report())
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Event::IndexChecked(result));
+        });
     }
     /// Sort the file list by the chosen key. Name/type sort here (over 20,000
     /// paths on a worker); metadata keys are read on a worker. Worker results
@@ -9263,6 +9312,7 @@ impl Viewer {
                 "cancel" => self.cancel_settings(),
                 "rescan" => self.dialog = Some(Dialog::Rescan),
                 "reindex" => self.dialog = Some(Dialog::Reindex),
+                "check_index" => self.check_index(),
                 "usn_install" | "usn_remove" | "usn_test" => self.usn_action(action),
                 "usn_refresh" => self.usn_refresh(),
                 "watch_check" => {
@@ -10570,7 +10620,7 @@ impl Viewer {
                             ui,
                             format!(
                                 "Keyword index: {}",
-                                parent.join("keyword-index.sqlite3").display()
+                                parent.join("catalog.sqlite3").display()
                             ),
                         );
                     }
@@ -10590,6 +10640,16 @@ impl Viewer {
                 if h.button(ui, "Rebuild keyword index…", false, !self.busy, false) {
                     actions.push("reindex");
                 }
+                if h.button(
+                    ui,
+                    "Check keyword index",
+                    false,
+                    self.folder.is_some(),
+                    false,
+                ) {
+                    actions.push("check_index");
+                }
+                h.note(ui, "Compares the open folder's images and the keywords NoirView shows with the keyword index, and changes nothing.");
 
                 h.note(ui, "Tags shows My tags by default. Additional includes image keywords with yellow borders. Use + to create your own tags.");
                 h.note(ui, "Remove tags hides words from the palette; existing image keywords remain unchanged.");
@@ -11716,6 +11776,15 @@ if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
 ui.label("Keywords of every image in the open folder are read again from the files. This can take a while for a large folder.");
 ui.horizontal(|ui|{if self.hover.button(ui,"Rebuild",false,!self.busy,true){if let Some(path)=self.current.clone().or_else(||self.folder.clone()){self.open_indexed(path,true);}close=true;}
 if self.hover.button(ui,"Cancel",false,true,false){close=true;}});},
+            Dialog::Report(title, text) => {
+                ui.heading(title.to_string());
+                egui::ScrollArea::vertical().max_height(360.).show(ui, |ui| {
+                    ui.label(text.as_str());
+                });
+                if self.hover.button(ui, "Close", false, true, false) {
+                    close = true;
+                }
+            }
             Dialog::Error(message)=>{ui.heading("Action needs attention");egui::ScrollArea::vertical().max_height(300.).show(ui,|ui|{ui.colored_label(RED,message);});if self.hover.button(ui,"Close",false,true,false){close=true;}},
         }});
             if close {

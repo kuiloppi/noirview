@@ -4,7 +4,7 @@ mod app;
 mod audio;
 mod bar_layout;
 mod clipboard;
-// Catalog foundation for large collections; not wired in yet.
+// Catalog for large collections; the keyword cache stores its rows here.
 #[allow(dead_code)]
 mod catalog;
 mod comfy;

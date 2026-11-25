@@ -163,7 +163,12 @@ fn scale_bench_folder_open() {
             NAME,
             count,
             "index_database_size",
-            mib(fs::metadata(&database).unwrap().len() as usize),
+            // The rows live in the catalog beside the given path (0.1.79).
+            mib([database.clone(), KeywordIndex::catalog_path(&database)]
+                .iter()
+                .filter_map(|p| fs::metadata(p).ok())
+                .map(|m| m.len() as usize)
+                .sum()),
             "MiB",
         );
 

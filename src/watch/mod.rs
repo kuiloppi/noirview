@@ -389,6 +389,14 @@ impl Engine {
                 }
                 rows.clear();
             }
+            // Written now (this already gathers its rows), so the viewer sees them.
+            if let Err(e) = index.write_pending() {
+                let warning = format!("Keyword index could not be saved: {e:#}");
+                let mut s = self.status.lock().unwrap();
+                if !s.warnings.contains(&warning) {
+                    s.warnings.push(warning);
+                }
+            }
         }
         self.last_flush = Instant::now();
     }
