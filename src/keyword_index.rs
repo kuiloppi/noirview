@@ -361,7 +361,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("photos");
         fs::create_dir_all(root.join("sub")).unwrap();
-        let (top, deep) = (root.join("a.jpg"), root.join("sub/b.jpg"));
+        let (top, deep) = (root.join("a.jpg"), root.join("sub").join("b.jpg"));
         fs::write(&top, b"x").unwrap();
         fs::write(&deep, b"y").unwrap();
         fs::write(crate::metadata::sidecar(&deep), b"<x/>").unwrap();
@@ -484,7 +484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("photos");
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        let (top, deep) = (root.join("a.jpg"), root.join("sub/b.jpg"));
+        let (top, deep) = (root.join("a.jpg"), root.join("sub").join("b.jpg"));
         std::fs::write(&top, b"x").unwrap();
         std::fs::write(&deep, b"y").unwrap();
         let mut index = KeywordIndex::open(&dir.path().join("index.sqlite3")).unwrap();
