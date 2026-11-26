@@ -63,15 +63,17 @@ static STEPPED_ASIDE: AtomicUsize = AtomicUsize::new(0);
 static READ_MS: AtomicUsize = AtomicUsize::new(0);
 static WAIT_MS: AtomicUsize = AtomicUsize::new(0);
 static READ_MIB: AtomicUsize = AtomicUsize::new(0);
-/// "urgent U background B (stopped S, stepped aside A) · R MiB in T ms, waited W ms".
+static DEMOTED: AtomicUsize = AtomicUsize::new(0);
+/// "urgent U background B (stopped S, stepped aside A, no longer on screen D) · R MiB in T ms, waited W ms".
 pub fn take_read_stats() -> String {
     let take = |a: &AtomicUsize| a.swap(0, Ordering::Relaxed);
     format!(
-        "urgent {} background {} (stopped {}, stepped aside {}) · {} MiB in {} ms, waited {} ms",
+        "urgent {} background {} (stopped {}, stepped aside {}, no longer on screen {}) · {} MiB in {} ms, waited {} ms",
         take(&READS_URGENT),
         take(&READS_BACKGROUND),
         take(&READS_STOPPED),
         take(&STEPPED_ASIDE),
+        take(&DEMOTED),
         take(&READ_MIB),
         take(&READ_MS),
         take(&WAIT_MS)
@@ -121,8 +123,9 @@ impl ReadTurn {
         };
         let mut data = Vec::with_capacity(len as usize);
         let mut counted = false;
+        let urgent_now = &urgent;
         loop {
-            let urgent = urgent();
+            let mut urgent = urgent_now();
             if !counted {
                 counted = true;
                 if urgent {
@@ -139,6 +142,12 @@ impl ReadTurn {
                     turn.urgent_waiting += 1;
                 }
                 while turn.busy || (!urgent && turn.urgent_waiting > 0) {
+                    // Scrolled past while waiting: no longer ahead of the queue.
+                    if urgent && !urgent_now() {
+                        urgent = false;
+                        turn.urgent_waiting -= 1;
+                        DEMOTED.fetch_add(1, Ordering::Relaxed);
+                    }
                     if !urgent && cancelled() {
                         return Err(stop());
                     }
@@ -157,6 +166,9 @@ impl ReadTurn {
             let reading = Instant::now();
             // Read while holding the turn; a background read steps aside after a
             // chunk when the image on screen is waiting.
+            // Urgency is asked again between chunks: an image scrolled past
+            // while it was read is no longer on screen, so its read becomes a
+            // background read (steps aside, stops when no longer wanted).
             let result = (|| -> io::Result<bool> {
                 loop {
                     if !urgent && cancelled() {
@@ -165,6 +177,10 @@ impl ReadTurn {
                     let read = (&mut file).take(IMAGE_CHUNK).read_to_end(&mut data)?;
                     if read == 0 || data.len() as u64 >= len {
                         return Ok(true);
+                    }
+                    if urgent && !urgent_now() {
+                        urgent = false;
+                        DEMOTED.fetch_add(1, Ordering::Relaxed);
                     }
                     if !urgent && self.lock().urgent_waiting > 0 {
                         return Ok(false);
@@ -304,5 +320,37 @@ mod tests {
         urgent.join().unwrap();
         background.join().unwrap();
         assert_eq!(*order.lock().unwrap(), vec!["urgent", "background"]);
+
+        // An image scrolled past while its read waits: no longer ahead of the
+        // queue, and it stops once it is not wanted.
+        let turn = Arc::new(ReadTurn::new());
+        turn.lock().busy = true;
+        let on_screen = Arc::new(AtomicBool::new(true));
+        let gone = Arc::new(AtomicBool::new(false));
+        let (screen, wanted_gone, path, reader) =
+            (on_screen.clone(), gone.clone(), small.clone(), turn.clone());
+        let waiting = std::thread::spawn(move || {
+            reader.read(
+                &path,
+                100,
+                || screen.load(Ordering::Relaxed),
+                || wanted_gone.load(Ordering::Relaxed),
+            )
+        });
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        until("queued as urgent", &|| turn.lock().urgent_waiting == 1);
+        on_screen.store(false, Ordering::Relaxed);
+        until("demoted", &|| turn.lock().urgent_waiting == 0);
+        gone.store(true, Ordering::Relaxed);
+        assert_eq!(
+            waiting.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
     }
 }

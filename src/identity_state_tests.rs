@@ -247,3 +247,47 @@ fn coalescing_later_mark_edits_retains_pending_metadata_rebinding() {
         assert!(result.tracked_marks.get(&old).is_none());
     }
 }
+/// The plan from the restricted reader equals the one from the whole library.
+fn plans_match(store: &Store, snapshot: Arc<Snapshot>) -> usize {
+    let c = open(store).unwrap();
+    let full = identity::plan(&read_library(&c).unwrap(), snapshot.clone());
+    let part = identity::plan(&read_identity_library(&c, &snapshot).unwrap(), snapshot);
+    assert_eq!(full.guard, part.guard);
+    assert_eq!(full.photos, part.photos);
+    assert_eq!(full.marks, part.marks);
+    assert_eq!(full.relocated, part.relocated);
+    // The restricted library is smaller than the whole one.
+    assert!(
+        read_identity_library(&c, &part.snapshot)
+            .unwrap()
+            .photos
+            .len()
+            <= read_library(&c).unwrap().photos.len()
+    );
+    full.relocated
+}
+#[test]
+fn the_restricted_reader_plans_like_the_whole_library() {
+    let (dir, store, a, mut lib, w, _rx) = setup();
+    w.shutdown();
+    // Unmarked keyword-only records, one of them at the move target (guard).
+    let b = dir.path().join("renamed.jpg");
+    let other = dir.path().join("other.jpg");
+    fs::write(&other, b"other").unwrap();
+    for (path, tag) in [(&b, "target"), (&other, "plain")] {
+        lib.photos
+            .entry(path.clone())
+            .or_default()
+            .tags
+            .insert(tag.into());
+    }
+    store.save(&lib).unwrap();
+    // Unchanged: nothing to do, the same (empty) plan.
+    assert_eq!(plans_match(&store, snapshot(&[&a, &other])), 0);
+    // Renamed onto the keyword-only record's path.
+    fs::rename(&a, &b).unwrap();
+    plans_match(&store, snapshot(&[&b, &other]));
+    // The old path reused by another file.
+    fs::write(&a, b"a new file at the old path").unwrap();
+    plans_match(&store, snapshot(&[&a, &b, &other]));
+}

@@ -158,6 +158,103 @@ fn read_library(connection: &Connection) -> Result<Library> {
     tx.commit()?;
     Ok(library)
 }
+/// What `identity::plan` reads, without the rest of the library: the header,
+/// the tracked marks, every photo row that is favorite, Elite or carries an
+/// identity, and the complete rows at each tracked record's path and at each
+/// path the snapshot reports for a tracked identity. The plan made from it is
+/// the one the whole library would give.
+fn read_identity_library(
+    connection: &Connection,
+    snapshot: &identity::Snapshot,
+) -> Result<Library> {
+    let tx = connection.unchecked_transaction()?;
+    let header: String =
+        tx.query_row("SELECT header FROM app_state WHERE id=1", [], |r| r.get(0))?;
+    let mut library: Library = serde_json::from_str(&header)?;
+    ensure!(library.schema <= 1, "Unsupported library version");
+    let exists = |name: &str| -> Result<bool> {
+        Ok(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1 AND type='table')",
+            [name],
+            |r| r.get(0),
+        )?)
+    };
+    if exists("file_marks")? {
+        let mut q = tx.prepare("SELECT identity,record FROM file_marks")?;
+        let mut rows = q.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let record: String = row.get(1)?;
+            library
+                .tracked_marks
+                .set(id, Some(serde_json::from_str(&record)?));
+        }
+    }
+    let identities = exists("image_identity")?;
+    let select = if identities {
+        "SELECT i.path,i.favorite,i.elite,k.keyword,fi.identity FROM images i
+        LEFT JOIN image_identity fi ON fi.image_id=i.id
+        LEFT JOIN image_keywords ik ON ik.image_id=i.id
+        LEFT JOIN keywords k ON k.id=ik.keyword_id"
+    } else {
+        "SELECT i.path,i.favorite,i.elite,k.keyword,NULL FROM images i
+        LEFT JOIN image_keywords ik ON ik.image_id=i.id
+        LEFT JOIN keywords k ON k.id=ik.keyword_id"
+    };
+    fn add(library: &mut Library, rows: &mut rusqlite::Rows) -> Result<()> {
+        while let Some(row) = rows.next()? {
+            let encoded: String = row.get(0)?;
+            let path: PathBuf = serde_json::from_str(&encoded)?;
+            let meta = library.photos.entry(path).or_default();
+            meta.favorite = row.get(1)?;
+            meta.elite = row.get(2)?;
+            meta.identity = row.get(4)?;
+            if let Some(keyword) = row.get::<_, Option<String>>(3)? {
+                meta.tags.insert(keyword);
+            }
+        }
+        Ok(())
+    }
+    {
+        let marked = if identities {
+            format!(
+                "{select} WHERE i.favorite=1 OR i.elite=1 OR fi.identity IS NOT NULL ORDER BY i.id"
+            )
+        } else {
+            format!("{select} WHERE i.favorite=1 OR i.elite=1 ORDER BY i.id")
+        };
+        let mut query = tx.prepare(&marked)?;
+        add(&mut library, &mut query.query([])?)?;
+    }
+    // The tracked records' paths and the paths where their identities are
+    // found now (move sources and targets), complete with keywords.
+    let mut paths: std::collections::BTreeSet<PathBuf> = Default::default();
+    for (id, record) in library.tracked_marks.iter() {
+        paths.insert(record.path.clone());
+        for (path, o) in &snapshot.paths {
+            if o.identity.as_ref() == Some(id) {
+                paths.insert(path.clone());
+            }
+        }
+    }
+    {
+        let mut query = tx.prepare(&format!("{select} WHERE i.path=?1"))?;
+        for path in paths {
+            if library.photos.contains_key(&path) {
+                continue;
+            }
+            add(
+                &mut library,
+                &mut query.query([serde_json::to_string(&path)?])?,
+            )?;
+        }
+    }
+    library.sync_marks(None);
+    library.photos.clear_changes();
+    library.tracked_marks.clear_changes();
+    tx.commit()?;
+    Ok(library)
+}
 fn write_header(connection: &Connection, library: &Library) -> Result<()> {
     connection.execute(
         "INSERT INTO app_state(id,header) VALUES(1,?1)
@@ -489,7 +586,7 @@ impl StateWriter {
                 match request.action {
                     Action::Identify(snapshot, token) => {
                         let plan = result.and_then(|()| {
-                            read_library(connection.as_ref().unwrap())
+                            read_identity_library(connection.as_ref().unwrap(), &snapshot)
                                 .map(|lib| identity::plan(&lib, snapshot))
                                 .map_err(|e| format!("{e:#}"))
                         });

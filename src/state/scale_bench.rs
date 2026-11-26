@@ -70,6 +70,36 @@ fn scale_bench_user_state() {
         assert_eq!(loaded.photos.len(), records);
         drop(loaded);
 
+        // The Identify path on the state writer: a snapshot of every path
+        // (no identities on these virtual files), the library read and the plan.
+        {
+            let snapshot = crate::identity::Snapshot {
+                serial: 0,
+                paths: (0..count)
+                    .map(|i| {
+                        (
+                            bench::virtual_path(i),
+                            crate::identity::Observation { identity: None },
+                        )
+                    })
+                    .collect(),
+            };
+            let snapshot = std::sync::Arc::new(snapshot);
+            let connection = open(&store).unwrap();
+            for (metric, restricted) in [
+                ("identify_whole_library", false),
+                ("identify_marked_rows", true),
+            ] {
+                let started = Instant::now();
+                let library = if restricted {
+                    read_identity_library(&connection, &snapshot).unwrap()
+                } else {
+                    read_library(&connection).unwrap()
+                };
+                let _plan = crate::identity::plan(&library, snapshot.clone());
+                report(NAME, count, metric, ms(started.elapsed()), "ms");
+            }
+        }
         let mut connection = open(&store).unwrap();
         lib.photos
             .entry(bench::virtual_path(0))

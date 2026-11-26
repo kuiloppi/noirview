@@ -2794,6 +2794,17 @@ impl Viewer {
         else {
             return;
         };
+        // Nothing marked and no identity known: a plan would change nothing.
+        if self.lib.tracked_marks.iter().next().is_none()
+            && !self
+                .lib
+                .photos
+                .values()
+                .any(|m| m.favorite || m.elite || m.identity.is_some())
+        {
+            self.identity_pending = false;
+            return;
+        }
         if let Some(writer) = &mut self.writer {
             match writer.identify(&mut self.lib, snapshot, self.identity_token) {
                 Ok(()) => {
