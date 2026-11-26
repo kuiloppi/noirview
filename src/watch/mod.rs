@@ -135,6 +135,8 @@ pub struct Setup {
     pub folders: Vec<WatchedFolder>,
     pub settings: Settings,
     pub cache: Arc<ThumbnailCache>,
+    /// The first-view cache, when first views are prepared for all images.
+    pub proxies: Option<Arc<ThumbnailCache>>,
     pub keyword_db: Option<PathBuf>,
     pub state_db: PathBuf,
     pub owner: &'static str,
@@ -350,8 +352,12 @@ impl Engine {
             }
         }
         if !self.status.lock().unwrap().cache_full {
-            match crate::imaging::generate_thumbnail(&self.setup.cache, path, &self.setup.settings)
-            {
+            match crate::imaging::generate_cached(
+                &self.setup.cache,
+                self.setup.proxies.as_ref(),
+                path,
+                &self.setup.settings,
+            ) {
                 Outcome::Generated => {
                     worked = true;
                     self.update(|s| s.thumbnails += 1);
@@ -535,6 +541,8 @@ pub struct Handle {
     pub pace: crate::model::WatchPace,
     /// Started with the change-journal source.
     pub journal: bool,
+    /// Prepares first views as well as thumbnails.
+    pub first_views: bool,
     pub status: Arc<Mutex<Status>>,
     stop: Arc<AtomicBool>,
     check_now: Arc<AtomicBool>,
@@ -548,6 +556,7 @@ impl Handle {
         let folders = setup.folders.clone();
         let pace = setup.settings.watch_pace;
         let journal = journal_wanted(&setup.settings);
+        let first_views = setup.proxies.is_some();
         let engine = Engine::new(
             setup,
             source,
@@ -568,6 +577,7 @@ impl Handle {
             folders,
             pace,
             journal,
+            first_views,
             status,
             stop,
             check_now,
@@ -629,6 +639,7 @@ mod tests {
             folders,
             settings: Settings::default(),
             cache,
+            proxies: None,
             keyword_db: Some(tmp.join("data/keyword-index.sqlite3")),
             state_db: tmp.join("data/watch-state.sqlite3"),
             owner: "test",

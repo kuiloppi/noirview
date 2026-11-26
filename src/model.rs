@@ -269,6 +269,12 @@ pub struct Settings {
     /// While browsing fast, show cached previews and read full images only
     /// when browsing pauses (a hard disk cannot read them as fast).
     pub fast_browse_previews: bool,
+    /// Browsing counts as fast from this many image changes a second.
+    pub fast_browse_rate: u32,
+    /// The full image is read after a pause this long (ms).
+    pub fast_browse_pause_ms: u64,
+    /// Previews prepared ahead while browsing fast.
+    pub fast_browse_ahead: usize,
     pub order: Order,
     pub wheel_up_next: bool,
     /// Random order: both wheel directions show a new random image instead
@@ -344,6 +350,10 @@ pub struct Settings {
     pub proxy_cache_mb: usize,
     /// Images whose longer side is at least this get a first view (pixels).
     pub proxy_min_side: u32,
+    /// Aggressive: the background pass (and folder watching) makes a first
+    /// view of every image, also below `proxy_min_side` (a quick copy of a
+    /// slow source, at most `PROXY_SIDE`), for sharp fast browsing.
+    pub first_views_for_all: bool,
     pub diagnostic_log: bool,
     /// Draws the window's edges, a point grid and the pointer as egui sees
     /// them, with window / surface sizes; logs changes to
@@ -624,6 +634,9 @@ impl Default for Settings {
             lens_full_window: true,
             jpeg_preview: true,
             fast_browse_previews: true,
+            fast_browse_rate: 4,
+            fast_browse_pause_ms: 150,
+            fast_browse_ahead: 24,
             order: Order::Sequential,
             wheel_up_next: true,
             random_wheel_both: false,
@@ -722,6 +735,7 @@ impl Default for Settings {
             cache_when_unfocused: false,
             proxy_cache_mb: 1024,
             proxy_min_side: 3328,
+            first_views_for_all: false,
             diagnostic_log: false,
             window_diagnostics: false,
             grid_start_mode: GridStartMode::Selection,
@@ -1064,6 +1078,7 @@ pub const PROFILE_EXCLUDED: &[&str] = &[
     "cache_when_unfocused",
     "proxy_cache_mb",
     "proxy_min_side",
+    "first_views_for_all",
     "cache_mb",
     "memory_use",
     "animation_mb",

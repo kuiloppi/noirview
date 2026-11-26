@@ -333,11 +333,23 @@ pub fn headless(args: &[String]) -> i32 {
         config.cache_root.clone(),
         config.settings.thumbnail_cache_mb,
     ));
+    // First views of new images too, when they are prepared for all images.
+    let proxies = (config.settings.first_views_for_all
+        && config.settings.loading_mode == crate::model::LoadingMode::Aggressive)
+        .then(|| config.cache_root.as_deref().map(crate::imaging::proxy_root))
+        .flatten()
+        .map(|root| {
+            Arc::new(ThumbnailCache::new(
+                Some(root),
+                config.settings.proxy_cache_mb,
+            ))
+        });
     let stop_dir = dir.clone();
     let setup = Setup {
         folders: config.folders.clone(),
         settings: config.settings.clone(),
         cache,
+        proxies,
         keyword_db: config.keyword_db.clone(),
         state_db: config.state_db.clone(),
         owner: "background",

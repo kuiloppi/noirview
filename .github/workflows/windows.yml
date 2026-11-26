@@ -60,4 +60,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: NoirView-windows-x64
-          path: dist/NoirView-0.1.87-windows-x64.zip
+          path: dist/NoirView-0.1.88-windows-x64.zip

@@ -72,7 +72,10 @@ fn scale_bench_decode_and_thumbnail_cache() {
         }
 
         // Persistent cache: first generation, stored size and a later hit.
-        let cache = ThumbnailCache::new(Some(dir.path().join(format!("cache-{pixels}"))), 512);
+        let cache = Arc::new(ThumbnailCache::new(
+            Some(dir.path().join(format!("cache-{pixels}"))),
+            512,
+        ));
         let started = Instant::now();
         let outcome = generate_thumbnail(&cache, &path, &Settings::default());
         assert_eq!(outcome, crate::pregen::Outcome::Generated);
@@ -118,7 +121,10 @@ fn scale_bench_decode_and_thumbnail_cache() {
             path
         })
         .collect();
-    let cache = ThumbnailCache::new(Some(dir.path().join("cache-small")), 512);
+    let cache = Arc::new(ThumbnailCache::new(
+        Some(dir.path().join("cache-small")),
+        512,
+    ));
     let started = Instant::now();
     for path in &paths {
         assert_eq!(

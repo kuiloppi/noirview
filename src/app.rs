@@ -56,6 +56,9 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "lens_full_window",
         "jpeg_preview",
         "fast_browse_previews",
+        "fast_browse_rate",
+        "fast_browse_pause_ms",
+        "fast_browse_ahead",
         "keep_previous_image",
         "fullscreen_image_only",
         "image_title_folder",
@@ -225,6 +228,7 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "cache_when_unfocused",
         "proxy_cache_mb",
         "proxy_min_side",
+        "first_views_for_all",
         "prefetch_ahead",
         "prefetch_behind",
         "thumbnail_cache_mb",
@@ -1087,21 +1091,22 @@ fn edit_distance(a: &str, b: &str) -> usize {
     }
     row[b.len()]
 }
-/// A pause this long after the last image change ends fast browsing.
-const FAST_BROWSE_PAUSE: Duration = Duration::from_millis(150);
-/// Previews prepared ahead while browsing fast.
-const FAST_PREVIEWS_AHEAD: usize = 24;
-/// Browsing fast: the image changed at least four times in the last second
-/// and the last change is under `FAST_BROWSE_PAUSE` ago.
-fn browsing_fast(steps: &std::collections::VecDeque<Instant>, now: Instant) -> bool {
+/// Browsing fast: the image changed at least `rate` times in the last
+/// second and the last change is under `pause` ago.
+fn browsing_fast(
+    steps: &std::collections::VecDeque<Instant>,
+    now: Instant,
+    rate: u32,
+    pause: Duration,
+) -> bool {
     let lately = steps
         .iter()
         .filter(|t| now.saturating_duration_since(**t) < Duration::from_secs(1))
         .count();
-    lately >= 4
+    lately >= rate.max(1) as usize
         && steps
             .back()
-            .is_some_and(|t| now.saturating_duration_since(*t) < FAST_BROWSE_PAUSE)
+            .is_some_and(|t| now.saturating_duration_since(*t) < pause)
 }
 /// A corner choice and the offset from it (Settings).
 fn corner_controls(
@@ -9711,7 +9716,27 @@ impl Viewer {
                     &mut s.fast_browse_previews,
                     "While browsing fast, show quick previews and load full images when you stop",
                 );
-                h.note(ui, "Fast: four or more images a second. Previews come from the thumbnail and first-view caches; the full image is read once browsing pauses for a moment, so a hard disk is not kept busy with images you pass.");
+                ui.add_enabled_ui(s.fast_browse_previews, |ui| {
+                    h.slider(
+                        ui,
+                        &mut s.fast_browse_rate,
+                        2..=12,
+                        "Fast from this many images a second",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.fast_browse_pause_ms,
+                        50..=800,
+                        "Pause before the full image is read (ms)",
+                    );
+                    h.slider(
+                        ui,
+                        &mut s.fast_browse_ahead,
+                        4..=48,
+                        "Previews prepared ahead while fast",
+                    );
+                });
+                h.note(ui, "Previews come from the thumbnail and first-view caches; the full image is read once browsing pauses, so a hard disk is not kept busy with images you pass. A shorter pause sharpens sooner but may start reads you then skip. Sharp previews need first views (Performance → First views).");
                 h.check(
                     ui,
                     &mut s.keep_previous_image,
@@ -10942,7 +10967,7 @@ impl Viewer {
                     h.slider(
                         ui,
                         &mut s.proxy_cache_mb,
-                        0..=4096,
+                        0..=16384,
                         "First-view disk cache for large images (MiB)",
                     );
                     h.slider(
@@ -10951,7 +10976,18 @@ impl Viewer {
                         crate::thumbnail_cache::PROXY_SIDE..=8192,
                         "Keep a first view for images at least this long (px, longer side)",
                     );
+                    let before = s.first_views_for_all;
+                    h.check(
+                        ui,
+                        &mut s.first_views_for_all,
+                        "Prepare first views for all images in the background (also smaller ones, and new images in watched folders)",
+                    );
+                    // Room for them: about 0.5–1 MiB an image.
+                    if s.first_views_for_all && !before && s.proxy_cache_mb < 4096 {
+                        s.proxy_cache_mb = 4096;
+                    }
                 });
+                h.note(ui, "Prepared first views make fast browsing sharp at once. Each image is read once in the background while the computer is idle; a first view takes about 0.5–1 MiB of the first-view cache (raised to 4096 MiB when this is turned on; put the cache on an SSD if you can).");
                 h.note(ui, "Without these options the background pass pauses 2 s after any input and while another program is in front. It always pauses during keyword indexing. The first view is a slightly compressed 2560 px copy shown until the exact image is ready; zero disables it. When one was shown, a note at the bottom left of the image reports its timing for a few seconds.");
                 let proxies = self.images.proxy_cache.stats();
                 if aggressive {
@@ -12216,10 +12252,13 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             self.watch.journal = crate::watch::journal_wanted(&config.settings);
         }
         let journal = self.watch.journal && config.settings.watch_use_journal;
+        let first_views = config.settings.first_views_for_all
+            && config.settings.loading_mode == crate::model::LoadingMode::Aggressive;
         let current = self.watch.handle.as_ref().is_some_and(|h| {
             h.folders == config.folders
                 && h.pace == config.settings.watch_pace
                 && h.journal == journal
+                && h.first_views == first_views
                 && !h.finished()
                 && self
                     .watch
@@ -12237,6 +12276,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                 folders: config.folders.clone(),
                 settings: config.settings.clone(),
                 cache: cache.clone(),
+                proxies: first_views.then(|| self.images.proxy_cache.clone()),
                 keyword_db: config.keyword_db.clone(),
                 state_db: config.state_db.clone(),
                 owner: "NoirView",
@@ -12627,11 +12667,17 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             let full = self.images.key(path.clone(), false);
             // Browsing fast: cached previews only; the full image is read when
             // browsing pauses (a hard disk cannot keep up with full images).
+            let pause = Duration::from_millis(self.lib.settings.fast_browse_pause_ms);
             let fast = self.lib.settings.fast_browse_previews
                 && !self.images.textures.contains_key(&full)
-                && browsing_fast(&self.recent_steps, Instant::now());
+                && browsing_fast(
+                    &self.recent_steps,
+                    Instant::now(),
+                    self.lib.settings.fast_browse_rate,
+                    pause,
+                );
             if fast {
-                ctx.request_repaint_after(FAST_BROWSE_PAUSE);
+                ctx.request_repaint_after(pause);
             }
             self.fast_browsing = fast;
             if (self.lib.settings.jpeg_preview || fast) && !self.images.textures.contains_key(&full)
@@ -12674,7 +12720,11 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             };
             if fast {
                 // Previews far ahead: small reads from the caches.
-                let ahead = if ahead == 0 { 0 } else { FAST_PREVIEWS_AHEAD };
+                let ahead = if ahead == 0 {
+                    0
+                } else {
+                    self.lib.settings.fast_browse_ahead
+                };
                 let paths = self
                     .nav
                     .prefetch(&self.visible, Some(path), order, ahead, behind);
@@ -13281,18 +13331,32 @@ mod tests {
     #[test]
     fn browsing_fast_needs_four_changes_a_second_and_no_pause() {
         let now = Instant::now();
+        let pause = Duration::from_millis(150);
         let steps = |ms: &[u64]| -> std::collections::VecDeque<Instant> {
             ms.iter()
                 .rev()
                 .map(|m| now - Duration::from_millis(*m))
                 .collect()
         };
-        assert!(browsing_fast(&steps(&[50, 200, 400, 700]), now));
+        assert!(browsing_fast(&steps(&[50, 200, 400, 700]), now, 4, pause));
         // Paused for 150 ms or more: the full image may load.
-        assert!(!browsing_fast(&steps(&[160, 400, 500, 700]), now));
+        assert!(!browsing_fast(&steps(&[160, 400, 500, 700]), now, 4, pause));
         // Too few changes in the last second.
-        assert!(!browsing_fast(&steps(&[50, 200, 1100, 1200]), now));
-        assert!(!browsing_fast(&steps(&[]), now));
+        assert!(!browsing_fast(
+            &steps(&[50, 200, 1100, 1200]),
+            now,
+            4,
+            pause
+        ));
+        assert!(!browsing_fast(&steps(&[]), now, 4, pause));
+        // The settings: a higher rate and a longer pause.
+        assert!(!browsing_fast(&steps(&[50, 200, 400, 700]), now, 6, pause));
+        assert!(browsing_fast(
+            &steps(&[160, 400, 500, 700]),
+            now,
+            4,
+            Duration::from_millis(300)
+        ));
     }
     #[test]
     fn view_timer_reports_a_first_view_only_when_one_was_shown() {
