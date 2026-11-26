@@ -11,7 +11,7 @@ if (-not $SkipChecks) {
     Run-Cargo test --locked
 }
 Run-Cargo build --release --locked
-$stage = Join-Path $PSScriptRoot 'dist/NoirView-0.1.86-windows-x64'
+$stage = Join-Path $PSScriptRoot 'dist/NoirView-0.1.87-windows-x64'
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item target/release/noirview.exe (Join-Path $stage 'NoirView.exe')

@@ -1088,7 +1088,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 /// A pause this long after the last image change ends fast browsing.
-const FAST_BROWSE_PAUSE: Duration = Duration::from_millis(300);
+const FAST_BROWSE_PAUSE: Duration = Duration::from_millis(150);
 /// Previews prepared ahead while browsing fast.
 const FAST_PREVIEWS_AHEAD: usize = 24;
 /// Browsing fast: the image changed at least four times in the last second
@@ -13288,8 +13288,8 @@ mod tests {
                 .collect()
         };
         assert!(browsing_fast(&steps(&[50, 200, 400, 700]), now));
-        // Paused for 300 ms or more: the full image may load.
-        assert!(!browsing_fast(&steps(&[320, 400, 500, 700]), now));
+        // Paused for 150 ms or more: the full image may load.
+        assert!(!browsing_fast(&steps(&[160, 400, 500, 700]), now));
         // Too few changes in the last second.
         assert!(!browsing_fast(&steps(&[50, 200, 1100, 1200]), now));
         assert!(!browsing_fast(&steps(&[]), now));
