@@ -51,6 +51,9 @@ struct ImageTurn {
 struct ReadTurn {
     state: Mutex<ImageTurn>,
     wake: Condvar,
+    /// Tests: whether each read that took the turn was urgent, in order.
+    #[cfg(test)]
+    taken: Mutex<Vec<bool>>,
 }
 static IMAGE_READS: ReadTurn = ReadTurn::new();
 const IMAGE_CHUNK: u64 = 4 * 1024 * 1024;
@@ -100,6 +103,8 @@ impl ReadTurn {
                 urgent_waiting: 0,
             }),
             wake: Condvar::new(),
+            #[cfg(test)]
+            taken: Mutex::new(Vec::new()),
         }
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, ImageTurn> {
@@ -161,6 +166,11 @@ impl ReadTurn {
                     turn.urgent_waiting -= 1;
                 }
                 turn.busy = true;
+                #[cfg(test)]
+                self.taken
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(urgent);
             }
             WAIT_MS.fetch_add(asked.elapsed().as_millis() as usize, Ordering::Relaxed);
             let reading = Instant::now();
@@ -301,6 +311,7 @@ mod tests {
                 order.lock().unwrap().push(name);
             })
         };
+        turn.taken.lock().unwrap().clear();
         let background = spawn("background", false);
         std::thread::sleep(Duration::from_millis(40));
         let urgent = spawn("urgent", true);
@@ -319,7 +330,9 @@ mod tests {
         turn.wake.notify_all();
         urgent.join().unwrap();
         background.join().unwrap();
-        assert_eq!(*order.lock().unwrap(), vec!["urgent", "background"]);
+        // The urgent read took the turn first (completion order can differ).
+        assert_eq!(*turn.taken.lock().unwrap(), vec![true, false]);
+        assert_eq!(order.lock().unwrap().len(), 2);
 
         // An image scrolled past while its read waits: no longer ahead of the
         // queue, and it stops once it is not wanted.

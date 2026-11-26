@@ -1086,6 +1086,20 @@ fn edit_distance(a: &str, b: &str) -> usize {
     }
     row[b.len()]
 }
+/// How far ahead to prepare images: the setting, and while the image changes
+/// at least four times a second, three times that (at most 24; the memory
+/// budget still decides how many are kept).
+fn fast_prefetch(ahead: usize, steps: &std::collections::VecDeque<Instant>, now: Instant) -> usize {
+    let lately = steps
+        .iter()
+        .filter(|t| now.saturating_duration_since(**t) < Duration::from_secs(1))
+        .count();
+    if ahead > 0 && lately >= 4 {
+        (ahead * 3).clamp(ahead, 24)
+    } else {
+        ahead
+    }
+}
 /// A corner choice and the offset from it (Settings).
 fn corner_controls(
     ui: &mut egui::Ui,
@@ -1921,6 +1935,8 @@ pub struct Viewer {
     /// When the image on screen last changed (saves wait while browsing).
     image_changed: Instant,
     image_seen: Option<PathBuf>,
+    /// When the image on screen changed lately (browsing speed).
+    recent_steps: std::collections::VecDeque<Instant>,
     /// This frame had input (smaller work slices, `view_build::slice`).
     frame_input: bool,
     files: Vec<PathBuf>,
@@ -2257,6 +2273,7 @@ impl Viewer {
             last_save: Instant::now(),
             image_changed: Instant::now(),
             image_seen: None,
+            recent_steps: Default::default(),
             frame_input: false,
             files: vec![],
             visible: VisibleFiles::default(),
@@ -12486,7 +12503,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         let thumbs = crate::decode_stats::take().unwrap_or_else(|| "-".into());
         let paint = paint_summary(&eframe::noirview_diag::take_paint_stats());
         let line = format!(
-            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} prefetch=[ahead {} behind {} · {}] reads=[{}] thumbs=[{}] paint=[{}]\n",
+            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} prefetch=[ahead {} (now {}) behind {} · {}] reads=[{}] thumbs=[{}] paint=[{}]\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
@@ -12506,6 +12523,11 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                 g.budget.map_or("-".into(), crate::memory::size)
             )),
             self.lib.settings.prefetch_ahead,
+            fast_prefetch(
+                self.lib.settings.prefetch_ahead,
+                &self.recent_steps,
+                Instant::now()
+            ),
             self.lib.settings.prefetch_behind,
             self.images.prefetch_summary(),
             crate::disk::take_read_stats(),
@@ -12624,11 +12646,16 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                         &self.visible,
                         Some(path),
                         order,
-                        // Tight memory: only the nearest images ahead and behind.
+                        // Tight memory: only the nearest images ahead and behind;
+                        // browsing fast: further ahead (bursts outrun a hard disk).
                         if self.memory_tight() {
                             self.lib.settings.prefetch_ahead.min(2)
                         } else {
-                            self.lib.settings.prefetch_ahead
+                            fast_prefetch(
+                                self.lib.settings.prefetch_ahead,
+                                &self.recent_steps,
+                                Instant::now(),
+                            )
                         },
                         if self.memory_tight() {
                             self.lib.settings.prefetch_behind.min(1)
@@ -13105,6 +13132,10 @@ impl eframe::App for Viewer {
         if self.image_seen != self.current {
             self.image_seen = self.current.clone();
             self.image_changed = Instant::now();
+            self.recent_steps.push_back(self.image_changed);
+            while self.recent_steps.len() > 16 {
+                self.recent_steps.pop_front();
+            }
         }
         if self.dirty
             && !self.restoring
@@ -13227,6 +13258,21 @@ mod tests {
         let mut viewer = Viewer::bootstrap(ctx.clone(), "test GPU".into(), None, startup);
         viewer.startup = None;
         viewer
+    }
+    #[test]
+    fn browsing_fast_prepares_further_ahead() {
+        let now = Instant::now();
+        let steps = |ms: &[u64]| -> std::collections::VecDeque<Instant> {
+            ms.iter().map(|m| now - Duration::from_millis(*m)).collect()
+        };
+        // Calm: the setting.
+        assert_eq!(fast_prefetch(7, &steps(&[100, 900, 2500]), now), 7);
+        // Four changes within the last second: three times, at most 24.
+        assert_eq!(fast_prefetch(7, &steps(&[50, 200, 400, 700]), now), 21);
+        assert_eq!(fast_prefetch(12, &steps(&[50, 200, 400, 700]), now), 24);
+        // Older steps do not count; zero stays zero.
+        assert_eq!(fast_prefetch(7, &steps(&[1100, 1200, 1300, 1400]), now), 7);
+        assert_eq!(fast_prefetch(0, &steps(&[50, 200, 400, 700]), now), 0);
     }
     #[test]
     fn view_timer_reports_a_first_view_only_when_one_was_shown() {
