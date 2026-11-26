@@ -266,6 +266,9 @@ pub struct Settings {
     pub lens_feather_px: f32,
     pub lens_full_window: bool,
     pub jpeg_preview: bool,
+    /// While browsing fast, show cached previews and read full images only
+    /// when browsing pauses (a hard disk cannot read them as fast).
+    pub fast_browse_previews: bool,
     pub order: Order,
     pub wheel_up_next: bool,
     /// Random order: both wheel directions show a new random image instead
@@ -620,6 +623,7 @@ impl Default for Settings {
             lens_feather_px: 18.,
             lens_full_window: true,
             jpeg_preview: true,
+            fast_browse_previews: true,
             order: Order::Sequential,
             wheel_up_next: true,
             random_wheel_both: false,

@@ -55,6 +55,7 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "lens_feather_px",
         "lens_full_window",
         "jpeg_preview",
+        "fast_browse_previews",
         "keep_previous_image",
         "fullscreen_image_only",
         "image_title_folder",
@@ -1086,19 +1087,21 @@ fn edit_distance(a: &str, b: &str) -> usize {
     }
     row[b.len()]
 }
-/// How far ahead to prepare images: the setting, and while the image changes
-/// at least four times a second, three times that (at most 24; the memory
-/// budget still decides how many are kept).
-fn fast_prefetch(ahead: usize, steps: &std::collections::VecDeque<Instant>, now: Instant) -> usize {
+/// A pause this long after the last image change ends fast browsing.
+const FAST_BROWSE_PAUSE: Duration = Duration::from_millis(300);
+/// Previews prepared ahead while browsing fast.
+const FAST_PREVIEWS_AHEAD: usize = 24;
+/// Browsing fast: the image changed at least four times in the last second
+/// and the last change is under `FAST_BROWSE_PAUSE` ago.
+fn browsing_fast(steps: &std::collections::VecDeque<Instant>, now: Instant) -> bool {
     let lately = steps
         .iter()
         .filter(|t| now.saturating_duration_since(**t) < Duration::from_secs(1))
         .count();
-    if ahead > 0 && lately >= 4 {
-        (ahead * 3).clamp(ahead, 24)
-    } else {
-        ahead
-    }
+    lately >= 4
+        && steps
+            .back()
+            .is_some_and(|t| now.saturating_duration_since(*t) < FAST_BROWSE_PAUSE)
 }
 /// A corner choice and the offset from it (Settings).
 fn corner_controls(
@@ -1937,6 +1940,8 @@ pub struct Viewer {
     image_seen: Option<PathBuf>,
     /// When the image on screen changed lately (browsing speed).
     recent_steps: std::collections::VecDeque<Instant>,
+    /// The last demand was in fast-browsing mode (previews only).
+    fast_browsing: bool,
     /// This frame had input (smaller work slices, `view_build::slice`).
     frame_input: bool,
     files: Vec<PathBuf>,
@@ -2274,6 +2279,7 @@ impl Viewer {
             image_changed: Instant::now(),
             image_seen: None,
             recent_steps: Default::default(),
+            fast_browsing: false,
             frame_input: false,
             files: vec![],
             visible: VisibleFiles::default(),
@@ -9702,6 +9708,12 @@ impl Viewer {
                 h.note(ui, "Uses cached thumbnails, embedded JPEG previews or reduced JPEG decoding. Magnification waits for full detail.");
                 h.check(
                     ui,
+                    &mut s.fast_browse_previews,
+                    "While browsing fast, show quick previews and load full images when you stop",
+                );
+                h.note(ui, "Fast: four or more images a second. Previews come from the thumbnail and first-view caches; the full image is read once browsing pauses for a moment, so a hard disk is not kept busy with images you pass.");
+                h.check(
+                    ui,
                     &mut s.keep_previous_image,
                     "Keep the previous image on screen until the next one is ready",
                 );
@@ -12503,7 +12515,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         let thumbs = crate::decode_stats::take().unwrap_or_else(|| "-".into());
         let paint = paint_summary(&eframe::noirview_diag::take_paint_stats());
         let line = format!(
-            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} prefetch=[ahead {} (now {}) behind {} · {}] reads=[{}] thumbs=[{}] paint=[{}]\n",
+            "{} mem={}MiB textures={}MiB budget={}MiB grid={} page={} index={} memory_guard={} ram_free={} gpu={} prefetch=[ahead {} ({}) behind {} · {}] reads=[{}] thumbs=[{}] paint=[{}]\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
@@ -12523,11 +12535,7 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
                 g.budget.map_or("-".into(), crate::memory::size)
             )),
             self.lib.settings.prefetch_ahead,
-            fast_prefetch(
-                self.lib.settings.prefetch_ahead,
-                &self.recent_steps,
-                Instant::now()
-            ),
+            if self.fast_browsing { "fast: previews" } else { "normal" },
             self.lib.settings.prefetch_behind,
             self.images.prefetch_summary(),
             crate::disk::take_read_stats(),
@@ -12617,7 +12625,17 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             );
         } else if let Some(path) = &self.current {
             let full = self.images.key(path.clone(), false);
-            if self.lib.settings.jpeg_preview && !self.images.textures.contains_key(&full) {
+            // Browsing fast: cached previews only; the full image is read when
+            // browsing pauses (a hard disk cannot keep up with full images).
+            let fast = self.lib.settings.fast_browse_previews
+                && !self.images.textures.contains_key(&full)
+                && browsing_fast(&self.recent_steps, Instant::now());
+            if fast {
+                ctx.request_repaint_after(FAST_BROWSE_PAUSE);
+            }
+            self.fast_browsing = fast;
+            if (self.lib.settings.jpeg_preview || fast) && !self.images.textures.contains_key(&full)
+            {
                 let thumb = self.images.key(path.clone(), true);
                 let aggressive =
                     self.lib.settings.loading_mode == crate::model::LoadingMode::Aggressive;
@@ -12634,38 +12652,39 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             }
             // The full image after its preview: a cached thumbnail is ready in
             // about a millisecond, a full decode can take a second on a hard disk.
-            high.push(full);
+            if !fast {
+                high.push(full);
+            }
             let order = if self.slideshow {
                 self.lib.settings.slideshow_order
             } else {
                 self.lib.settings.order
             };
-            low.extend(
-                self.nav
-                    .prefetch(
-                        &self.visible,
-                        Some(path),
-                        order,
-                        // Tight memory: only the nearest images ahead and behind;
-                        // browsing fast: further ahead (bursts outrun a hard disk).
-                        if self.memory_tight() {
-                            self.lib.settings.prefetch_ahead.min(2)
-                        } else {
-                            fast_prefetch(
-                                self.lib.settings.prefetch_ahead,
-                                &self.recent_steps,
-                                Instant::now(),
-                            )
-                        },
-                        if self.memory_tight() {
-                            self.lib.settings.prefetch_behind.min(1)
-                        } else {
-                            self.lib.settings.prefetch_behind
-                        },
-                    )
-                    .into_iter()
-                    .map(|p| self.images.key(p, false)),
-            );
+            // Tight memory: only the nearest images ahead and behind.
+            let (ahead, behind) = if self.memory_tight() {
+                (
+                    self.lib.settings.prefetch_ahead.min(2),
+                    self.lib.settings.prefetch_behind.min(1),
+                )
+            } else {
+                (
+                    self.lib.settings.prefetch_ahead,
+                    self.lib.settings.prefetch_behind,
+                )
+            };
+            if fast {
+                // Previews far ahead: small reads from the caches.
+                let ahead = if ahead == 0 { 0 } else { FAST_PREVIEWS_AHEAD };
+                let paths = self
+                    .nav
+                    .prefetch(&self.visible, Some(path), order, ahead, behind);
+                low.extend(paths.into_iter().map(|p| self.images.preview_key(p)));
+            } else {
+                let paths = self
+                    .nav
+                    .prefetch(&self.visible, Some(path), order, ahead, behind);
+                low.extend(paths.into_iter().map(|p| self.images.key(p, false)));
+            }
         }
         if self.recent_open {
             let recent: Vec<PathBuf> = self.recent.iter().cloned().collect();
@@ -13260,19 +13279,20 @@ mod tests {
         viewer
     }
     #[test]
-    fn browsing_fast_prepares_further_ahead() {
+    fn browsing_fast_needs_four_changes_a_second_and_no_pause() {
         let now = Instant::now();
         let steps = |ms: &[u64]| -> std::collections::VecDeque<Instant> {
-            ms.iter().map(|m| now - Duration::from_millis(*m)).collect()
+            ms.iter()
+                .rev()
+                .map(|m| now - Duration::from_millis(*m))
+                .collect()
         };
-        // Calm: the setting.
-        assert_eq!(fast_prefetch(7, &steps(&[100, 900, 2500]), now), 7);
-        // Four changes within the last second: three times, at most 24.
-        assert_eq!(fast_prefetch(7, &steps(&[50, 200, 400, 700]), now), 21);
-        assert_eq!(fast_prefetch(12, &steps(&[50, 200, 400, 700]), now), 24);
-        // Older steps do not count; zero stays zero.
-        assert_eq!(fast_prefetch(7, &steps(&[1100, 1200, 1300, 1400]), now), 7);
-        assert_eq!(fast_prefetch(0, &steps(&[50, 200, 400, 700]), now), 0);
+        assert!(browsing_fast(&steps(&[50, 200, 400, 700]), now));
+        // Paused for 300 ms or more: the full image may load.
+        assert!(!browsing_fast(&steps(&[320, 400, 500, 700]), now));
+        // Too few changes in the last second.
+        assert!(!browsing_fast(&steps(&[50, 200, 1100, 1200]), now));
+        assert!(!browsing_fast(&steps(&[]), now));
     }
     #[test]
     fn view_timer_reports_a_first_view_only_when_one_was_shown() {
