@@ -541,8 +541,9 @@ pub struct Handle {
     pub pace: crate::model::WatchPace,
     /// Started with the change-journal source.
     pub journal: bool,
-    /// Prepares first views as well as thumbnails.
-    pub first_views: bool,
+    /// Prepares first views as well as thumbnails: the folders they are made
+    /// in (`Settings::first_view_scope_key`).
+    pub first_views: Option<u64>,
     pub status: Arc<Mutex<Status>>,
     stop: Arc<AtomicBool>,
     check_now: Arc<AtomicBool>,
@@ -556,7 +557,10 @@ impl Handle {
         let folders = setup.folders.clone();
         let pace = setup.settings.watch_pace;
         let journal = journal_wanted(&setup.settings);
-        let first_views = setup.proxies.is_some();
+        let first_views = setup
+            .proxies
+            .is_some()
+            .then(|| setup.settings.first_view_scope_key());
         let engine = Engine::new(
             setup,
             source,

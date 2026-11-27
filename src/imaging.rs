@@ -155,8 +155,8 @@ pub fn generate_thumbnail(
 ) -> crate::pregen::Outcome {
     generate_cached(cache, None, path, settings)
 }
-/// The thumbnail, and with `first_views_for_all` in Aggressive loading the
-/// first view, of one image, unless the caches have them (one decode for
+/// The thumbnail, and where `Settings::first_views_for` the path the first
+/// view, of one image, unless the caches have them (one decode for
 /// both). Used by the background pass and the folder watcher.
 pub fn generate_cached(
     cache: &Arc<ThumbnailCache>,
@@ -169,11 +169,8 @@ pub fn generate_cached(
         return Outcome::Failed;
     };
     let proxy = proxies
-        .filter(|_| {
-            settings.first_views_for_all
-                && settings.loading_mode == crate::model::LoadingMode::Aggressive
-        })
-        .filter(|p| p.budget() > 0 && p.stats().bytes < p.budget() / 10 * 9)
+        .filter(|_| settings.first_views_for(path))
+        .filter(|p| p.has_room())
         .and_then(|p| {
             p.token(path, Kind::Proxy)
                 .filter(|t| !p.contains(t))
@@ -447,10 +444,11 @@ impl Images {
         self.disk_cache.configure(s.thumbnail_cache_mb);
         self.proxy_cache
             .configure(if s.loading_mode == crate::model::LoadingMode::Aggressive {
-                s.proxy_cache_mb
+                s.proxy_budget_mb()
             } else {
                 0
             });
+        self.proxy_cache.keep_free(s.proxy_keep_free());
         let processing = Processing {
             upscale: s.upscale,
             factor: s.upscale_factor,
@@ -880,7 +878,10 @@ fn harvest(
     if thumbnail.is_none() && proxy.is_none() {
         return None;
     }
-    let (min_side, for_all) = (r.settings.proxy_min_side, r.settings.first_views_for_all);
+    let (min_side, for_all) = (
+        r.settings.proxy_min_side,
+        r.settings.first_views_for(&r.key.path),
+    );
     Some(Box::new(move |image: &DynamicImage| {
         store_reduced(image, thumbnail, proxy, min_side, for_all)
     }))

@@ -229,6 +229,13 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "proxy_cache_mb",
         "proxy_min_side",
         "first_views_for_all",
+        "first_views_everywhere",
+        "first_views_watched",
+        "first_views_favorites",
+        "first_views_selected",
+        "first_view_folders",
+        "proxy_cache_unlimited",
+        "proxy_keep_free_gb",
         "prefetch_ahead",
         "prefetch_behind",
         "thumbnail_cache_mb",
@@ -300,6 +307,7 @@ enum Event {
     Runtime(PathBuf),
     ExtraBackup(PathBuf),
     ThumbnailCacheDir(PathBuf),
+    FirstViewFolder(PathBuf),
     /// A folder chosen for the favorite folders (new, or replacing one).
     FavoriteFolder(PathBuf),
     /// Where a kind of file dialog was when it closed.
@@ -807,8 +815,9 @@ type PregenKey = (
     Option<PathBuf>,
     crate::model::LoadingMode,
     usize,
-    bool,
+    u64,
     usize,
+    u32,
 );
 #[derive(Clone, Copy)]
 enum TagAction {
@@ -1033,7 +1042,7 @@ fn title_line(ui: &mut egui::Ui, title: Option<String>, width: f32, raise: f32) 
 /// The GUID under which Windows keeps a file dialog's position, size and
 /// last folder: one per kind of dialog, the same in every NoirView version.
 fn dialog_guid(kind: &str) -> u128 {
-    const KINDS: [&str; 12] = [
+    const KINDS: [&str; 13] = [
         "open",
         "file",
         "destination",
@@ -1046,11 +1055,10 @@ fn dialog_guid(kind: &str) -> u128 {
         "watch",
         "restore",
         "other",
+        // New kinds after "other": the earlier ones keep their GUIDs.
+        "first_view_folder",
     ];
-    let index = KINDS
-        .iter()
-        .position(|k| *k == kind)
-        .unwrap_or(KINDS.len() - 1);
+    let index = KINDS.iter().position(|k| *k == kind).unwrap_or(11); // "other"
     0x6e6f_6972_7669_4577_9d4c_3a51_7e20_0000 + index as u128
 }
 
@@ -2623,6 +2631,10 @@ impl Viewer {
                     .set_title("Folder to watch")
                     .pick_folder()
                     .map(Event::WatchFolder),
+                "first_view_folder" => dialog
+                    .set_title("Folder for first views")
+                    .pick_folder()
+                    .map(Event::FirstViewFolder),
                 "restore" => dialog
                     .add_filter("NoirView backup", &["json"])
                     .pick_file()
@@ -3217,6 +3229,14 @@ impl Viewer {
                     self.lib.settings.thumbnail_cache_dir = p;
                     self.changed();
                     self.notify("Restart NoirView to use the new thumbnail cache folder");
+                }
+                Event::FirstViewFolder(path) => {
+                    let s = &mut self.lib.settings;
+                    if !s.first_view_folders.contains(&path) {
+                        s.first_view_folders.push(path);
+                        s.first_views_selected = true;
+                        self.changed();
+                    }
                 }
                 Event::WatchFolder(path) => {
                     let s = &mut self.lib.settings;
@@ -10764,6 +10784,7 @@ impl Viewer {
                     &mut s.watch_folders,
                     "Keep thumbnails and keywords of these folders up to date",
                 );
+                h.note(ui, "With Settings → Performance → \"Prepare first views for all images in the background\" (Aggressive loading, in every folder or in watched folders) the watcher also prepares first views of the images in these folders, new images included.");
                 let mut remove = None;
                 for (i, folder) in s.watched_folders.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
@@ -10974,12 +10995,27 @@ impl Viewer {
                         &mut s.cache_when_unfocused,
                         "Keep caching thumbnails and first views when the window is not active",
                     );
-                    h.slider(
+                    ui.add_enabled_ui(!s.proxy_cache_unlimited, |ui| {
+                        h.slider(
+                            ui,
+                            &mut s.proxy_cache_mb,
+                            0..=16384,
+                            "First-view disk cache (MiB)",
+                        );
+                    });
+                    h.check(
                         ui,
-                        &mut s.proxy_cache_mb,
-                        0..=16384,
-                        "First-view disk cache for large images (MiB)",
+                        &mut s.proxy_cache_unlimited,
+                        "No size limit for the first-view cache (only free disk space limits it)",
                     );
+                    if s.proxy_cache_unlimited {
+                        h.slider(
+                            ui,
+                            &mut s.proxy_keep_free_gb,
+                            1..=500,
+                            "Keep at least this much free space on the cache's disk (GiB)",
+                        );
+                    }
                     h.slider(
                         ui,
                         &mut s.proxy_min_side,
@@ -10993,22 +11029,86 @@ impl Viewer {
                         "Prepare first views for all images in the background (also smaller ones, and new images in watched folders)",
                     );
                     // Room for them: about 0.5–1 MiB an image.
-                    if s.first_views_for_all && !before && s.proxy_cache_mb < 4096 {
-                        s.proxy_cache_mb = 4096;
+                    if s.first_views_for_all && !before {
+                        s.proxy_cache_unlimited = true;
+                    }
+                    if s.first_views_for_all {
+                        ui.indent("first_view_places", |ui| {
+                            h.check(ui, &mut s.first_views_everywhere, "In every folder");
+                            ui.add_enabled_ui(!s.first_views_everywhere, |ui| {
+                                h.check(ui, &mut s.first_views_watched, "In watched folders");
+                                h.check(ui, &mut s.first_views_favorites, "In favorite folders");
+                                h.check(ui, &mut s.first_views_selected, "In these folders:");
+                                let mut remove = None;
+                                for (i, folder) in s.first_view_folders.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::Label::new(folder.display().to_string())
+                                                .truncate(),
+                                        );
+                                        if h.button(ui, "Remove", false, true, false) {
+                                            remove = Some(i);
+                                        }
+                                    });
+                                }
+                                if let Some(i) = remove {
+                                    s.first_view_folders.remove(i);
+                                }
+                                if h.button(ui, "Add folder…", false, true, false) {
+                                    actions.push("first_view_folder");
+                                }
+                            });
+                        });
                     }
                 });
-                h.note(ui, "Prepared first views make fast browsing sharp at once. Each image is read once in the background while the computer is idle; a first view takes about 0.5–1 MiB of the first-view cache (raised to 4096 MiB when this is turned on; put the cache on an SSD if you can).");
+                h.note(ui, "Prepared first views make fast browsing sharp at once. Each image is read once in the background while the computer is idle; a first view takes about 0.5–1 MiB of the first-view cache (no size limit is set when this is turned on; put the cache on an SSD if you can). Outside the chosen folders, images opened in full still get a first view when they are at least as long as set above. Folders are prepared while they are open; watched folders also while NoirView is closed, when the watcher runs in the background.");
                 h.note(ui, "Without these options the background pass pauses 2 s after any input and while another program is in front. It always pauses during keyword indexing. The first view is a slightly compressed 2560 px copy shown until the exact image is ready; zero disables it. When one was shown, a note at the bottom left of the image reports its timing for a few seconds.");
                 let proxies = self.images.proxy_cache.stats();
                 if aggressive {
-                    h.note(ui, format!(
-                        "First views: {} hits / {} saved this session ({} not saved) · {} stored ({} MiB)",
-                        proxies.hits,
-                        proxies.writes,
-                        proxies.skipped + proxies.errors,
-                        proxies.entries,
-                        proxies.bytes / (1024 * 1024)
-                    ));
+                    let cache = &self.images.proxy_cache;
+                    let limit = if s.proxy_cache_unlimited {
+                        "no limit".to_string()
+                    } else {
+                        format!("limit {} MiB", s.proxy_cache_mb)
+                    };
+                    let free = cache
+                        .free_space()
+                        .map(|b| {
+                            format!(
+                                " · {:.1} GiB free on its disk",
+                                b as f64 / (1u64 << 30) as f64
+                            )
+                        })
+                        .unwrap_or_default();
+                    h.note(
+                        ui,
+                        format!(
+                            "First-view cache: {} MiB in {} first views ({limit}){free}",
+                            proxies.bytes / (1024 * 1024),
+                            proxies.entries,
+                        ),
+                    );
+                    if let Some(root) = cache.root() {
+                        h.note(ui, format!("Location: {}", root.display()));
+                    }
+                    h.note(
+                        ui,
+                        format!(
+                            "First views this session: {} shown, {} saved, {} not saved",
+                            proxies.hits,
+                            proxies.writes,
+                            proxies.skipped + proxies.errors,
+                        ),
+                    );
+                    if s.proxy_budget_mb() > 0 && !cache.space_ok() {
+                        h.note(ui, RichText::new(format!(
+                            "Less than {} GiB is free on the cache's disk: no more first views are saved.",
+                            s.proxy_keep_free_gb
+                        )).color(RED));
+                    } else if s.first_views_for_all && s.proxy_budget_mb() > 0 && !cache.has_room()
+                    {
+                        h.note(ui, RichText::new("The first-view cache is full (90 % of its limit): the background pass makes no more first views. Raise the limit or choose no size limit.").color(RED));
+                    }
                     if let Some(summary) = self.view_timer.as_ref().and_then(|t| t.summary()) {
                         h.note(ui, format!("Last opened image: {summary}"));
                     }
@@ -12246,6 +12346,13 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             s.watch_folders,
             s.thumbnail_cache_mb,
             s.watch_pace,
+            // The background process prepares first views by these too.
+            (
+                s.loading_mode,
+                s.first_view_scope_key(),
+                s.proxy_budget_mb(),
+                s.proxy_keep_free_gb,
+            ),
         ))
         .unwrap_or_default();
         if bytes != self.watch.config && self.watch.lock.is_some() {
@@ -12268,11 +12375,18 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
         let journal = self.watch.journal && config.settings.watch_use_journal;
         let first_views = config.settings.first_views_for_all
             && config.settings.loading_mode == crate::model::LoadingMode::Aggressive;
+        let first_view_key = first_views.then(|| config.settings.first_view_scope_key());
+        // Images seen before need first views too: check every file once.
+        let first_views_changed = self
+            .watch
+            .handle
+            .as_ref()
+            .is_some_and(|h| h.first_views != first_view_key && first_view_key.is_some());
         let current = self.watch.handle.as_ref().is_some_and(|h| {
             h.folders == config.folders
                 && h.pace == config.settings.watch_pace
                 && h.journal == journal
-                && h.first_views == first_views
+                && h.first_views == first_view_key
                 && !h.finished()
                 && self
                     .watch
@@ -12301,6 +12415,9 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             match Handle::start(setup, source) {
                 Ok(handle) => {
                     handle.status.lock().unwrap().warnings.extend(warnings);
+                    if first_views_changed {
+                        handle.check_now();
+                    }
                     self.watch.handle = Some(handle);
                     self.watch.cache = Some(cache);
                     self.watch.error = None;
@@ -12636,8 +12753,9 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             s.loading_mode,
             s.thumbnail_cache_mb,
             // A pass that already covered the folder runs again for first views.
-            s.first_views_for_all,
-            s.proxy_cache_mb,
+            s.first_view_scope_key(),
+            s.proxy_budget_mb(),
+            s.proxy_keep_free_gb,
         );
         if self.pregen_key.as_ref() == Some(&key) {
             return;
@@ -14579,6 +14697,7 @@ mod tests {
             "favorite",
             "watch",
             "restore",
+            "first_view_folder",
         ];
         let guids: HashSet<u128> = kinds.iter().map(|k| dialog_guid(k)).collect();
         assert_eq!(guids.len(), kinds.len());

@@ -339,10 +339,9 @@ pub fn headless(args: &[String]) -> i32 {
         .then(|| config.cache_root.as_deref().map(crate::imaging::proxy_root))
         .flatten()
         .map(|root| {
-            Arc::new(ThumbnailCache::new(
-                Some(root),
-                config.settings.proxy_cache_mb,
-            ))
+            let proxies = ThumbnailCache::new(Some(root), config.settings.proxy_budget_mb());
+            proxies.keep_free(config.settings.proxy_keep_free());
+            Arc::new(proxies)
         });
     let stop_dir = dir.clone();
     let setup = Setup {

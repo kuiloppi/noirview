@@ -354,6 +354,17 @@ pub struct Settings {
     /// view of every image, also below `proxy_min_side` (a quick copy of a
     /// slow source, at most `PROXY_SIDE`), for sharp fast browsing.
     pub first_views_for_all: bool,
+    /// Where `first_views_for_all` applies: every folder, or only the chosen
+    /// kinds of folders below.
+    pub first_views_everywhere: bool,
+    pub first_views_watched: bool,
+    pub first_views_favorites: bool,
+    pub first_views_selected: bool,
+    pub first_view_folders: Vec<PathBuf>,
+    /// No size limit for the first-view cache: only free disk space
+    /// (`proxy_keep_free_gb`) stops it.
+    pub proxy_cache_unlimited: bool,
+    pub proxy_keep_free_gb: u32,
     pub diagnostic_log: bool,
     /// Draws the window's edges, a point grid and the pointer as egui sees
     /// them, with window / surface sizes; logs changes to
@@ -736,6 +747,13 @@ impl Default for Settings {
             proxy_cache_mb: 1024,
             proxy_min_side: 3328,
             first_views_for_all: false,
+            first_views_everywhere: true,
+            first_views_watched: false,
+            first_views_favorites: false,
+            first_views_selected: false,
+            first_view_folders: Vec::new(),
+            proxy_cache_unlimited: false,
+            proxy_keep_free_gb: 20,
             diagnostic_log: false,
             window_diagnostics: false,
             grid_start_mode: GridStartMode::Selection,
@@ -838,7 +856,86 @@ impl Default for Settings {
         }
     }
 }
+/// Whether `path` is `root` or inside it (on Windows case-insensitive,
+/// without the `\\?\` prefix).
+pub fn path_under(path: &Path, root: &Path) -> bool {
+    if cfg!(windows) {
+        let norm = |p: &Path| {
+            let s = p.to_string_lossy().replace('/', "\\");
+            let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+            s.trim_end_matches('\\').to_lowercase()
+        };
+        let (path, root) = (norm(path), norm(root));
+        path == root || path.starts_with(&format!("{root}\\"))
+    } else {
+        path.starts_with(root)
+    }
+}
 impl Settings {
+    /// The first-view cache's budget (MiB) in Aggressive loading.
+    pub fn proxy_budget_mb(&self) -> usize {
+        if self.proxy_cache_unlimited {
+            crate::thumbnail_cache::UNLIMITED_MB
+        } else {
+            self.proxy_cache_mb
+        }
+    }
+    /// Free disk space the first-view cache leaves (bytes; 0: no check).
+    pub fn proxy_keep_free(&self) -> u64 {
+        if self.proxy_cache_unlimited {
+            u64::from(self.proxy_keep_free_gb) << 30
+        } else {
+            0
+        }
+    }
+    /// Whether the image at `path` gets a first view in the background
+    /// (`first_views_for_all` in Aggressive loading, in a chosen folder).
+    pub fn first_views_for(&self, path: &Path) -> bool {
+        self.first_views_for_all
+            && self.loading_mode == LoadingMode::Aggressive
+            && (self.first_views_everywhere
+                || (self.first_views_watched
+                    && self.watched_folders.iter().any(|w| {
+                        if w.subfolders {
+                            path_under(path, &w.path)
+                        } else {
+                            path.parent()
+                                .is_some_and(|p| path_under(p, &w.path) && path_under(&w.path, p))
+                        }
+                    }))
+                || (self.first_views_favorites
+                    && self
+                        .favorite_folders
+                        .iter()
+                        .any(|f| path_under(path, &f.path)))
+                || (self.first_views_selected
+                    && self.first_view_folders.iter().any(|f| path_under(path, f))))
+    }
+    /// Changes when the folders `first_views_for` covers change.
+    pub fn first_view_scope_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.first_views_for_all,
+            self.first_views_everywhere,
+            self.first_views_watched,
+            self.first_views_favorites,
+            self.first_views_selected,
+            &self.first_view_folders,
+        )
+            .hash(&mut h);
+        if self.first_views_watched {
+            for w in &self.watched_folders {
+                (&w.path, w.subfolders).hash(&mut h);
+            }
+        }
+        if self.first_views_favorites {
+            for f in &self.favorite_folders {
+                f.path.hash(&mut h);
+            }
+        }
+        h.finish()
+    }
     /// The settings a profile keeps, by their saved names.
     pub fn profile_values(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut values = match serde_json::to_value(self) {
@@ -1079,6 +1176,13 @@ pub const PROFILE_EXCLUDED: &[&str] = &[
     "proxy_cache_mb",
     "proxy_min_side",
     "first_views_for_all",
+    "first_views_everywhere",
+    "first_views_watched",
+    "first_views_favorites",
+    "first_views_selected",
+    "first_view_folders",
+    "proxy_cache_unlimited",
+    "proxy_keep_free_gb",
     "cache_mb",
     "memory_use",
     "animation_mb",
@@ -2884,5 +2988,64 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn first_views_are_prepared_in_the_chosen_folders() {
+        let root = std::env::temp_dir().join("noirview-scope");
+        let (watched, flat, favorite, chosen) = (
+            root.join("watched"),
+            root.join("flat"),
+            root.join("favorite"),
+            root.join("chosen"),
+        );
+        let image = |dir: &Path| dir.join("sub").join("a.png");
+        let mut s = Settings {
+            loading_mode: LoadingMode::Aggressive,
+            first_views_for_all: true,
+            ..Default::default()
+        };
+        s.watched_folders = vec![
+            WatchedFolder {
+                path: watched.clone(),
+                subfolders: true,
+            },
+            WatchedFolder {
+                path: flat.clone(),
+                subfolders: false,
+            },
+        ];
+        s.favorite_folders = vec![FavoriteFolder {
+            name: String::new(),
+            path: favorite.clone(),
+        }];
+        s.first_view_folders = vec![chosen.clone()];
+        let other = root.join("other").join("a.png");
+        assert!(s.first_views_for(&other));
+        s.first_views_everywhere = false;
+        assert!(!s.first_views_for(&other));
+        let before = s.first_view_scope_key();
+        s.first_views_watched = true;
+        assert_ne!(s.first_view_scope_key(), before);
+        assert!(s.first_views_for(&image(&watched)));
+        assert!(!s.first_views_for(&image(&flat)));
+        assert!(s.first_views_for(&flat.join("a.png")));
+        assert!(!s.first_views_for(&image(&favorite)));
+        s.first_views_favorites = true;
+        assert!(s.first_views_for(&image(&favorite)));
+        assert!(!s.first_views_for(&image(&chosen)));
+        s.first_views_selected = true;
+        assert!(s.first_views_for(&image(&chosen)));
+        // A folder whose name only starts the same is not inside.
+        assert!(!s.first_views_for(&root.join("chosen2").join("a.png")));
+        s.loading_mode = LoadingMode::Standard;
+        assert!(!s.first_views_for(&image(&chosen)));
+    }
+    #[test]
+    fn first_view_cache_limits() {
+        let mut s = Settings::default();
+        assert_eq!((s.proxy_budget_mb(), s.proxy_keep_free()), (1024, 0));
+        s.proxy_cache_unlimited = true;
+        assert_eq!(s.proxy_budget_mb(), crate::thumbnail_cache::UNLIMITED_MB);
+        assert_eq!(s.proxy_keep_free(), 20 << 30);
     }
 }

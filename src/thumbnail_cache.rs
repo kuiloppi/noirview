@@ -27,6 +27,10 @@ const MAX_BLOB: usize = 6 * 1024 * 1024;
 // Opaque thumbnails are stored as JPEG (~40-80 KiB), so the byte budget, not
 // the entry count, normally decides how many fit.
 const MAX_ENTRIES: i64 = 65536;
+/// A budget with no practical limit (MiB); only free disk space stops writes.
+pub const UNLIMITED_MB: usize = 1 << 28;
+/// How often free disk space is checked again.
+const SPACE_CHECK: Duration = Duration::from_secs(10);
 const JPEG_QUALITY: u8 = 90;
 const PENDING_BYTES: usize = 64 * 1024 * 1024;
 const PENDING_ENTRIES: usize = 128;
@@ -116,6 +120,31 @@ struct Core {
     accepting: AtomicBool,
     skipped: AtomicU64,
     errors: AtomicU64,
+    /// Writes stop while the cache's disk has less free space than this.
+    keep_free: AtomicU64,
+    space: Mutex<Option<(Instant, Option<u64>)>>,
+}
+impl Core {
+    /// Free space on the cache's disk (checked at most every `SPACE_CHECK`).
+    fn free_space(&self) -> Option<u64> {
+        let root = self.root.as_deref()?;
+        let mut space = self.space.lock().unwrap();
+        if let Some((at, free)) = *space {
+            if at.elapsed() < SPACE_CHECK {
+                return free;
+            }
+        }
+        let free = crate::disk::free_space(root);
+        *space = Some((Instant::now(), free));
+        free
+    }
+    fn space_ok(&self) -> bool {
+        let keep = self.keep_free.load(Ordering::Relaxed);
+        keep == 0 || self.free_space().is_none_or(|free| free >= keep)
+    }
+}
+fn budget_bytes(mb: usize) -> usize {
+    mb.saturating_mul(1024 * 1024)
 }
 /// Pixels still to be encoded by the writer, or an image its producer
 /// already encoded (large first views: ~1 MiB instead of ~15 MiB waiting).
@@ -196,7 +225,7 @@ impl ThumbnailCache {
             root,
             wake: Arc::new(wake),
             reader: Mutex::new(None),
-            budget: AtomicUsize::new(budget_mb.min(4096) * 1024 * 1024),
+            budget: AtomicUsize::new(budget_bytes(budget_mb)),
             epoch: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             writes: AtomicU64::new(0),
@@ -208,6 +237,8 @@ impl ThumbnailCache {
             accepting: AtomicBool::new(true),
             skipped: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            keep_free: AtomicU64::new(0),
+            space: Mutex::new(None),
         });
         let mut worker_handle = None;
         let tx = if core.root.is_some() {
@@ -311,7 +342,7 @@ impl ThumbnailCache {
         }
     }
     pub fn configure(&self, mb: usize) {
-        let bytes = mb.min(4096) * 1024 * 1024;
+        let bytes = budget_bytes(mb);
         let old = self.core.budget.swap(bytes, Ordering::Relaxed);
         if bytes > 0 && bytes < old {
             self.core.needs_prune.store(true, Ordering::Relaxed);
@@ -323,6 +354,29 @@ impl ThumbnailCache {
     /// Byte budget (0 when disabled).
     pub fn budget(&self) -> u64 {
         self.core.budget.load(Ordering::Relaxed) as u64
+    }
+    /// Stop writing while the cache's disk has less free space than `bytes`
+    /// (0: no check).
+    pub fn keep_free(&self, bytes: u64) {
+        self.core.keep_free.store(bytes, Ordering::Relaxed);
+    }
+    /// The folder of the cache's files.
+    pub fn root(&self) -> Option<&Path> {
+        self.core.root.as_deref()
+    }
+    /// Free space on the cache's disk, if known.
+    pub fn free_space(&self) -> Option<u64> {
+        self.core.free_space()
+    }
+    /// Whether the cache's disk has the free space it must keep.
+    pub fn space_ok(&self) -> bool {
+        self.core.space_ok()
+    }
+    /// Room for a background pass: below 90 % of the budget, so it never
+    /// evicts its own earlier entries, and enough free disk space.
+    pub fn has_room(&self) -> bool {
+        let budget = self.budget();
+        budget > 0 && self.stats().bytes < budget / 10 * 9 && self.space_ok()
     }
     /// Whether a current entry exists, without decoding it.
     pub fn contains(&self, token: &Token) -> bool {
@@ -432,6 +486,10 @@ impl ThumbnailCache {
             return;
         };
         if self.core.budget.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if !self.core.space_ok() {
+            self.core.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let mut pending = self.core.pending.lock().unwrap();
@@ -756,7 +814,9 @@ fn trim(c: &Connection, budget: usize) -> Result<(u64, u64)> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    while bytes > budget as i64 || entries > MAX_ENTRIES {
+    // Large budgets hold more entries (first views of big folders).
+    let max_entries = MAX_ENTRIES.max((budget / (64 * 1024)).min(i64::MAX as usize) as i64);
+    while bytes > budget.min(i64::MAX as usize) as i64 || entries > max_entries {
         let (key, size): (Vec<u8>, i64) = c.query_row(
             "SELECT key,size FROM thumbnails ORDER BY used,key LIMIT 1",
             [],
@@ -1114,6 +1174,28 @@ mod tests {
         cache.store(old, &pixels(), [80, 120]);
         cache.flush();
         assert_eq!(cache.stats().writes, 1);
+    }
+    #[test]
+    fn large_budgets_are_kept_and_low_disk_space_stops_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = source(dir.path(), "a");
+        let cache = ThumbnailCache::new(Some(dir.path().join("proxies")), 8192);
+        assert_eq!(cache.budget(), 8192 << 20);
+        cache.configure(UNLIMITED_MB);
+        assert_eq!(cache.budget() as usize, UNLIMITED_MB << 20);
+        assert!(cache.has_room());
+        // The disk reports less free space than the cache must leave.
+        *cache.core.space.lock().unwrap() = Some((Instant::now(), Some(10 << 20)));
+        cache.keep_free(1 << 30);
+        assert!(!cache.space_ok() && !cache.has_room());
+        cache.store(cache.token(&a, Kind::Proxy).unwrap(), &pixels(), [80, 120]);
+        cache.flush();
+        assert_eq!((cache.stats().entries, cache.stats().skipped), (0, 1));
+        cache.keep_free(0);
+        assert!(cache.has_room());
+        cache.store(cache.token(&a, Kind::Proxy).unwrap(), &pixels(), [80, 120]);
+        cache.flush();
+        assert_eq!(cache.stats().entries, 1);
     }
     #[test]
     fn lru_budget_evicts_the_untouched_entry_and_zero_disables_disk_access() {

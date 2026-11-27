@@ -219,6 +219,33 @@ impl ReadTurn {
     }
 }
 
+/// Free space available to this user on the disk that holds `path` (or its
+/// nearest existing parent). `None` where it cannot be read.
+pub fn free_space(path: &Path) -> Option<u64> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    free_space_at(existing)
+}
+#[cfg(windows)]
+fn free_space_at(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    // SAFETY: `wide` is NUL-terminated; the other outputs may be null.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
+}
+#[cfg(not(windows))]
+fn free_space_at(_path: &Path) -> Option<u64> {
+    None
+}
 pub fn set_grid_demand(tiles: usize) {
     GRID_DEMAND.store(tiles, Ordering::Relaxed);
 }
