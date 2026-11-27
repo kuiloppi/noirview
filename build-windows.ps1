@@ -11,7 +11,9 @@ if (-not $SkipChecks) {
     Run-Cargo test --locked
 }
 Run-Cargo build --release --locked
-$stage = Join-Path $PSScriptRoot 'dist/NoirView-0.1.88-windows-x64'
+$version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+if (-not $version) { throw 'version not found in Cargo.toml' }
+$stage = Join-Path $PSScriptRoot "dist/NoirView-$version-windows-x64"
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item target/release/noirview.exe (Join-Path $stage 'NoirView.exe')

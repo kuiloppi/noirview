@@ -1,6 +1,6 @@
 [package]
 name = "noirview"
-version = "0.1.89"
+version = "0.1.90"
 edition = "2021"
 rust-version = "1.89"
 description = "A quiet, GPU-rendered image viewer for Windows"
