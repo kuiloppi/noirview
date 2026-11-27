@@ -86,7 +86,7 @@ fn main() {
         }
     } else {
         eprintln!(
-            "NoirView USN broker. Install it from NoirView: Settings → Library → Watched folders."
+            "NoirView USN broker. Install it from NoirView: Settings → Folders & tags → Watched folders."
         );
         2
     };

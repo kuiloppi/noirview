@@ -194,7 +194,7 @@ impl MemoryUse {
     }
 }
 /// A folder whose thumbnails and keywords are kept up to date in the
-/// background (Settings → Library → Watched folders).
+/// background (Settings → Folders & tags → Watched folders).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchedFolder {
     pub path: PathBuf,

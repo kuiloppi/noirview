@@ -2272,7 +2272,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "noirview"
-version = "0.1.91"
+version = "0.1.92"
 dependencies = [
  "anyhow",
  "chrono",

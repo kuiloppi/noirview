@@ -351,6 +351,11 @@ impl ThumbnailCache {
             }
         }
     }
+    /// Sets the byte budget directly (a full cache without filling it).
+    #[cfg(test)]
+    pub fn core_budget_for_test(&self, bytes: usize) {
+        self.core.budget.store(bytes, Ordering::Relaxed);
+    }
     /// Byte budget (0 when disabled).
     pub fn budget(&self) -> u64 {
         self.core.budget.load(Ordering::Relaxed) as u64
@@ -377,6 +382,24 @@ impl ThumbnailCache {
     pub fn has_room(&self) -> bool {
         let budget = self.budget();
         budget > 0 && self.stats().bytes < budget / 10 * 9 && self.space_ok()
+    }
+    /// The source image's size stored with a current entry, without decoding it.
+    pub fn source_size(&self, token: &Token) -> Option<[u32; 2]> {
+        if token.epoch != self.core.epoch.load(Ordering::Relaxed)
+            || self.core.budget.load(Ordering::Relaxed) == 0
+        {
+            return None;
+        }
+        self.core.read_with(|c| {
+            c.query_row(
+                "SELECT source_width, source_height FROM thumbnails WHERE key=?1",
+                params![token.key],
+                |r| Ok([r.get::<_, u32>(0)?, r.get::<_, u32>(1)?]),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        })
     }
     /// Whether a current entry exists, without decoding it.
     pub fn contains(&self, token: &Token) -> bool {

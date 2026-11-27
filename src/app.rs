@@ -507,7 +507,7 @@ struct MovePlan {
     /// Chosen images (Move selected) rather than the whole folder.
     selected: bool,
     /// Sequence names' width, and whether free numbers come first
-    /// (Settings → Library).
+    /// (Settings → Move & delete).
     digits: usize,
     fill_gaps: bool,
     /// The image shown (the floating Move button), or the images marked
@@ -739,6 +739,23 @@ impl Hover {
         label: &str,
     ) {
         let r = ui.add(egui::Slider::new(value, range).text(label));
+        self.found(ui, r.rect, label);
+        self.watch(r, false);
+    }
+    /// A number typed or dragged, without an upper limit to speak of.
+    fn number(&mut self, ui: &mut egui::Ui, value: &mut usize, suffix: &str, label: &str) {
+        let r = ui
+            .horizontal(|ui| {
+                let r = ui.add(
+                    egui::DragValue::new(value)
+                        .range(0..=1usize << 24)
+                        .speed(16.)
+                        .suffix(suffix),
+                );
+                ui.label(label);
+                r
+            })
+            .inner;
         self.found(ui, r.rect, label);
         self.watch(r, false);
     }
@@ -1039,6 +1056,17 @@ fn title_line(ui: &mut egui::Ui, title: Option<String>, width: f32, raise: f32) 
     }
 }
 
+/// "45 s", "12 min 4 s", "1 h 5 min".
+fn spoken_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{} h {} min", secs / 3600, secs % 3600 / 60)
+    } else if secs >= 60 {
+        format!("{} min {} s", secs / 60, secs % 60)
+    } else {
+        format!("{secs} s")
+    }
+}
 /// The GUID under which Windows keeps a file dialog's position, size and
 /// last folder: one per kind of dialog, the same in every NoirView version.
 fn dialog_guid(kind: &str) -> u128 {
@@ -1992,7 +2020,7 @@ pub struct Viewer {
     watch: WatchState,
     /// The low-latency choice last written for the next start.
     display_written: Option<(bool, String, bool)>,
-    /// The optional USN service, as last checked (Settings → Library).
+    /// The optional USN service, as last checked (Settings → Folders & tags).
     usn: UsnView,
     /// Generation parameters of the image whose menu was last opened.
     generation: Option<(PathBuf, Option<crate::comfy::Generation>)>,
@@ -2036,7 +2064,7 @@ pub struct Viewer {
     group_open: Option<&'static str>,
     /// Settings → Display → Bar buttons: the bar being arranged.
     bar_buttons_tab: &'static str,
-    /// Settings → Library → Favorite folders: the entry whose folder is
+    /// Settings → Folders & tags → Favorite folders: the entry whose folder is
     /// being chosen again (None: a new one).
     favorite_pick: Option<usize>,
     /// NoirView's window, the owner of file and folder dialogs.
@@ -3755,7 +3783,7 @@ impl Viewer {
     }
     /// Go to image `n` (the image view) or page `n` (the grid page, pages in
     /// order), counted from 1 and kept within the list.
-    /// The saved place in a favorite folder (Settings → Library: favorite
+    /// The saved place in a favorite folder (Settings → Folders & tags: favorite
     /// folders open where browsing left them; kept per profile).
     fn favorite_place(&self, folder: &Path) -> Option<&FolderPlace> {
         let s = &self.lib.settings;
@@ -4511,7 +4539,7 @@ impl Viewer {
     }
     /// The top bar's text after NOIRVIEW: the shown image's name, or on the
     /// grid page its first and last image (or the first and "…"), with the
-    /// folder and the number of images when chosen (Settings → Library).
+    /// folder and the number of images when chosen (Settings → Image view).
     fn top_title(&mut self, grid_tiles: bool) -> Option<String> {
         let name = |p: &Path| {
             p.file_name()
@@ -5611,7 +5639,7 @@ impl Viewer {
         }
         response
     }
-    /// Settings → Library → Window size diagnostics: draws the window's
+    /// Settings → Advanced → Window size diagnostics: draws the window's
     /// edges, a 100-point grid and the pointer as egui sees them, with the
     /// sizes winit, the surface and Windows report; changes and clicks go to
     /// data/noirview-window.log.
@@ -5766,7 +5794,7 @@ impl Viewer {
             )
         });
         let text = format!(
-            "NoirView window diagnostics — Settings → Library → Window size diagnostics turns this off\n\
+            "NoirView window diagnostics — Settings → Advanced → Window size diagnostics turns this off\n\
              {sizes}\npointer {pointer_text} · winit cursor {cursor} · frame {}",
             d.frames
         );
@@ -7541,7 +7569,7 @@ impl Viewer {
         if let Some(p) = self.images.pregen_progress() {
             if p.full {
                 ui.label(RichText::new("· thumbnail cache full").color(MUTED))
-                    .on_hover_text("Increase Settings → Library → Thumbnail disk cache to cache the whole folder");
+                    .on_hover_text("Increase Settings → Performance → Thumbnail disk cache to cache the whole folder");
             } else if p.done < p.total {
                 // Progress advances in the background; refresh it gently.
                 ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -7550,7 +7578,11 @@ impl Viewer {
                 } else {
                     " (paused)"
                 };
-                let what = if self.lib.settings.first_views_for_all {
+                let what = if self
+                    .visible
+                    .first()
+                    .is_some_and(|path| self.lib.settings.first_views_for(path))
+                {
                     "first views"
                 } else {
                     "thumbnails"
@@ -10996,11 +11028,11 @@ impl Viewer {
                         "Keep caching thumbnails and first views when the window is not active",
                     );
                     ui.add_enabled_ui(!s.proxy_cache_unlimited, |ui| {
-                        h.slider(
+                        h.number(
                             ui,
                             &mut s.proxy_cache_mb,
-                            0..=16384,
-                            "First-view disk cache (MiB)",
+                            " MiB",
+                            "First-view disk cache (type any size; 0 turns it off)",
                         );
                     });
                     h.check(
@@ -11094,7 +11126,7 @@ impl Viewer {
                     h.note(
                         ui,
                         format!(
-                            "First views this session: {} shown, {} saved, {} not saved",
+                            "First views since NoirView started: {} shown, {} saved, {} not saved",
                             proxies.hits,
                             proxies.writes,
                             proxies.skipped + proxies.errors,
@@ -11120,11 +11152,11 @@ impl Viewer {
                 h.slider(ui, &mut s.prefetch_behind, 0..=32, "Prefetch behind");
                 h.note(ui, "Maximum images in and against the browsing direction. Memory limits may reduce these counts. Zero disables that side.");
                 h.section(ui, "Thumbnail cache");
-                h.slider(
+                h.number(
                     ui,
                     &mut s.thumbnail_cache_mb,
-                    0..=4096,
-                    "Thumbnail disk cache (MiB)",
+                    " MiB",
+                    "Thumbnail disk cache (type any size; 0 turns it off)",
                 );
                 h.note(ui, "Speeds up reopening thumbnails. Zero disables disk caching; full image detail is preserved.");
                 if let Some(p) = self.images.pregen_progress() {
@@ -11141,17 +11173,42 @@ impl Viewer {
                                 _ => String::new(),
                             };
                             format!(
-                                "Pre-generated: {} / {} images ({} new this pass){pause}",
-                                p.done, p.total, p.generated
+                                "Pre-generated: {} / {} images ({} new this pass) in {}{pause}",
+                                p.done,
+                                p.total,
+                                p.generated,
+                                spoken_duration(p.elapsed)
                             )
                         },
                     );
+                    let wanted = p.first_views + p.first_views_missing;
+                    if s.first_views_for_all && wanted + p.small > 0 {
+                        let mut parts = vec![format!("{} made now", p.first_views_made)];
+                        if p.small > 0 {
+                            parts.push(format!("{} small enough to need none", p.small));
+                        }
+                        if p.first_views_missing > 0 {
+                            parts.push(format!("{} not made", p.first_views_missing));
+                        }
+                        if p.failed > 0 {
+                            parts.push(format!("{} unreadable", p.failed));
+                        }
+                        h.note(
+                            ui,
+                            format!(
+                                "This folder: {} of {} images have a first view ({})",
+                                p.first_views,
+                                wanted,
+                                parts.join(", ")
+                            ),
+                        );
+                    }
                 }
                 let cache = self.images.disk_cache.stats();
                 h.note(
                     ui,
                     format!(
-                        "Thumbnail cache: {} hits / {} saved this session · {} stored ({} MiB)",
+                        "Thumbnail cache: {} hits / {} saved since NoirView started · {} stored ({} MiB)",
                         cache.hits,
                         cache.writes,
                         cache.entries,

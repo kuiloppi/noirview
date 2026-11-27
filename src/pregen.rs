@@ -21,12 +21,50 @@ pub enum Outcome {
     Full,
 }
 
+/// What became of an image's first view (`Settings::first_views_for`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstView {
+    /// Not prepared for this image (option off or another folder).
+    NotWanted,
+    /// Small enough for its thumbnail: needs none.
+    Small,
+    /// Already in the cache.
+    Present,
+    Made,
+    /// Wanted but not made: no room in the first-view cache, or a failure.
+    Missing,
+}
+/// One image's result in a background pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Step {
+    pub outcome: Outcome,
+    pub first_view: FirstView,
+}
+impl From<Outcome> for Step {
+    fn from(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            first_view: FirstView::NotWanted,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Progress {
     pub done: usize,
     pub total: usize,
     pub generated: usize,
+    pub failed: usize,
     pub full: bool,
+    /// Images that got or had a first view, of those it was prepared for.
+    pub first_views: usize,
+    pub first_views_made: usize,
+    /// First views wanted but not made (cache full or failed).
+    pub first_views_missing: usize,
+    /// Images small enough to need no first view.
+    pub small: usize,
+    /// Time from the start of the pass to its last finished image.
+    pub elapsed: Duration,
 }
 
 #[derive(Default)]
@@ -38,6 +76,7 @@ struct State {
     settings: Settings,
     enabled: bool,
     stopped: bool,
+    started: Option<Instant>,
 }
 
 pub struct Pregen {
@@ -133,11 +172,12 @@ pub fn rest_at(worked: Duration, pace: crate::model::WatchPace) -> Duration {
 }
 
 impl Pregen {
-    pub fn start(
+    pub fn start<S: Into<Step>>(
         workers: usize,
         idle: impl Fn() -> bool + Send + Sync + 'static,
-        work: impl Fn(&Path, &Settings) -> Outcome + Send + Sync + 'static,
+        work: impl Fn(&Path, &Settings) -> S + Send + Sync + 'static,
     ) -> Arc<Self> {
+        let work = move |path: &Path, settings: &Settings| work(path, settings).into();
         let pregen = Arc::new(Self {
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
@@ -163,7 +203,7 @@ impl Pregen {
     fn pending(s: &State) -> bool {
         s.enabled && !s.progress.full && s.next < s.paths.len()
     }
-    fn run(&self, idle: &dyn Fn() -> bool, work: &dyn Fn(&Path, &Settings) -> Outcome) {
+    fn run(&self, idle: &dyn Fn() -> bool, work: &dyn Fn(&Path, &Settings) -> Step) {
         loop {
             // Wait for work, then for the viewer to be idle.
             loop {
@@ -194,19 +234,40 @@ impl Pregen {
                 (path, s.settings.clone(), s.list)
             };
             let started = Instant::now();
-            let outcome = work(&path, &settings);
+            let step = work(&path, &settings);
+            let outcome = step.outcome;
             if outcome == Outcome::Generated {
                 std::thread::sleep(rest(started.elapsed()));
             }
             let mut s = self.state.lock().unwrap();
             if s.list == list {
+                let p = &mut s.progress;
                 match outcome {
-                    Outcome::Full => s.progress.full = true,
+                    Outcome::Full => p.full = true,
                     Outcome::Generated => {
-                        s.progress.done += 1;
-                        s.progress.generated += 1;
+                        p.done += 1;
+                        p.generated += 1;
                     }
-                    Outcome::Cached | Outcome::Failed => s.progress.done += 1,
+                    Outcome::Cached => p.done += 1,
+                    Outcome::Failed => {
+                        p.done += 1;
+                        p.failed += 1;
+                    }
+                }
+                if outcome != Outcome::Full {
+                    match step.first_view {
+                        FirstView::NotWanted => {}
+                        FirstView::Small => p.small += 1,
+                        FirstView::Present => p.first_views += 1,
+                        FirstView::Made => {
+                            p.first_views += 1;
+                            p.first_views_made += 1;
+                        }
+                        FirstView::Missing => p.first_views_missing += 1,
+                    }
+                }
+                if let Some(at) = s.started {
+                    s.progress.elapsed = at.elapsed();
                 }
             }
         }
@@ -223,6 +284,7 @@ impl Pregen {
         s.next = 0;
         s.settings = settings.clone();
         s.enabled = enabled;
+        s.started = Some(Instant::now());
         self.wake.notify_all();
     }
     pub fn progress(&self) -> Option<Progress> {
@@ -287,6 +349,46 @@ mod tests {
         pregen.stop();
     }
 
+    #[test]
+    fn the_pass_counts_first_views_and_its_time() {
+        let pregen = Pregen::start(
+            1,
+            || true,
+            |path, _| {
+                let first_view = match path.to_str().unwrap() {
+                    "made" => FirstView::Made,
+                    "had" => FirstView::Present,
+                    "small" => FirstView::Small,
+                    "full" => FirstView::Missing,
+                    _ => FirstView::NotWanted,
+                };
+                let outcome = if path == Path::new("bad") {
+                    Outcome::Failed
+                } else {
+                    Outcome::Cached
+                };
+                Step {
+                    outcome,
+                    first_view,
+                }
+            },
+        );
+        let list = ["made", "had", "small", "full", "bad", "other"].map(PathBuf::from);
+        pregen.set(list.to_vec(), &Settings::default(), true);
+        let p = wait(&pregen, |p| p.done == 6);
+        assert_eq!(
+            (
+                p.first_views,
+                p.first_views_made,
+                p.small,
+                p.first_views_missing,
+                p.failed
+            ),
+            (2, 1, 1, 1, 1)
+        );
+        assert!(p.elapsed > Duration::ZERO);
+        pregen.stop();
+    }
     #[test]
     fn full_cache_stops_and_a_new_list_restarts_counting() {
         let pregen = Pregen::start(

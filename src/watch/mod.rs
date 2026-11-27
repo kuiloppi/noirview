@@ -40,6 +40,7 @@ pub struct Batch {
     pub images: u64,
     pub thumbnails: u64,
     pub keywords: u64,
+    pub first_views: u64,
     pub secs: u64,
 }
 impl Batch {
@@ -55,8 +56,13 @@ impl Batch {
         } else {
             String::new()
         };
+        let first_views = if self.first_views > 0 {
+            format!(", {} first views made", self.first_views)
+        } else {
+            String::new()
+        };
         format!(
-            "{} image(s) checked, {} thumbnails made, {} keywords read in {time}{rate}",
+            "{} image(s) checked, {} thumbnails made{first_views}, {} keywords read in {time}{rate}",
             self.images, self.thumbnails, self.keywords
         )
     }
@@ -79,6 +85,9 @@ pub struct Status {
     pub checked: u64,
     pub thumbnails: u64,
     pub keywords: u64,
+    pub first_views: u64,
+    /// First views wanted but not made (no room in their cache).
+    pub first_views_missing: u64,
     pub failed: u64,
     pub cache_full: bool,
     /// The work in progress, and the last finished one.
@@ -94,14 +103,21 @@ pub struct Status {
 impl Status {
     pub fn summary(&self) -> String {
         let mut text = format!(
-            "{} · {} folder(s) · queue {} image(s) + {} folder(s) · thumbnails made {} · keywords read {}",
+            "{} · {} folder(s) · queue {} image(s) + {} folder(s) · thumbnails made {} · first views made {} · keywords read {}",
             self.state,
             self.folders,
             self.queue,
             self.folders_waiting,
             self.thumbnails,
+            self.first_views,
             self.keywords
         );
+        if self.first_views_missing > 0 {
+            text.push_str(&format!(
+                " · {} first views not made (first-view cache full)",
+                self.first_views_missing
+            ));
+        }
         if self.failed > 0 {
             text.push_str(&format!(" · {} unreadable", self.failed));
         }
@@ -169,7 +185,7 @@ pub struct Engine {
     writes: Vec<Vec<(Vec<u8>, CachedKeywords)>>,
     last_flush: Instant,
     /// Start of the current batch and the counters then.
-    batch: Option<(Instant, [u64; 3])>,
+    batch: Option<(Instant, [u64; 4])>,
 }
 
 impl Engine {
@@ -351,21 +367,29 @@ impl Engine {
                 Err(_) => failed = true,
             }
         }
-        if !self.status.lock().unwrap().cache_full {
-            match crate::imaging::generate_cached(
-                &self.setup.cache,
-                self.setup.proxies.as_ref(),
-                path,
-                &self.setup.settings,
-            ) {
-                Outcome::Generated => {
-                    worked = true;
-                    self.update(|s| s.thumbnails += 1);
-                }
-                Outcome::Full => self.update(|s| s.cache_full = true),
-                Outcome::Failed => failed = true,
-                Outcome::Cached => {}
+        // A full cache makes nothing new, but each image is still asked:
+        // first views have a cache of their own, and room comes back.
+        let step = crate::imaging::generate_cached(
+            &self.setup.cache,
+            self.setup.proxies.as_ref(),
+            path,
+            &self.setup.settings,
+        );
+        match step.outcome {
+            Outcome::Generated => {
+                worked = true;
+                self.update(|s| s.thumbnails += 1);
             }
+            Outcome::Full => self.update(|s| s.cache_full = true),
+            Outcome::Failed => failed = true,
+            Outcome::Cached => {}
+        }
+        match step.first_view {
+            crate::pregen::FirstView::Made => self.update(|s| s.first_views += 1),
+            crate::pregen::FirstView::Missing if step.outcome != Outcome::Failed => {
+                self.update(|s| s.first_views_missing += 1)
+            }
+            _ => {}
         }
         self.update(|s| {
             s.checked += 1;
@@ -432,12 +456,13 @@ impl Engine {
         }
     }
     fn batch_progress(&self) -> Option<Batch> {
-        let (started, [checked, thumbnails, keywords]) = self.batch?;
+        let (started, [checked, thumbnails, keywords, first_views]) = self.batch?;
         let s = self.status.lock().unwrap();
         Some(Batch {
             images: s.checked - checked,
             thumbnails: s.thumbnails - thumbnails,
             keywords: s.keywords - keywords,
+            first_views: s.first_views - first_views,
             secs: started.elapsed().as_secs(),
         })
     }
@@ -465,7 +490,10 @@ impl Engine {
             if let Some((root, path)) = self.next() {
                 if self.batch.is_none() {
                     let s = self.status.lock().unwrap();
-                    self.batch = Some((Instant::now(), [s.checked, s.thumbnails, s.keywords]));
+                    self.batch = Some((
+                        Instant::now(),
+                        [s.checked, s.thumbnails, s.keywords, s.first_views],
+                    ));
                 }
                 self.update(|s| s.state = "working".into());
                 let started = Instant::now();
@@ -730,6 +758,52 @@ mod tests {
         });
         assert_eq!((s.thumbnails, s.keywords), (1, 1));
         handle.stop();
+    }
+
+    #[test]
+    fn new_images_get_first_views_even_when_the_thumbnail_cache_is_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let large = |path: &Path, shade: u8| {
+            image::RgbImage::from_pixel(900, 600, image::Rgb([shade, 90, 160]))
+                .save(path)
+                .unwrap();
+        };
+        large(&root.join("a.png"), 1);
+        jpeg(&root.join("small.jpg"), 2);
+        let folders = vec![WatchedFolder {
+            path: root.clone(),
+            subfolders: true,
+        }];
+        let cache = Arc::new(ThumbnailCache::new(Some(tmp.path().join("thumbs")), 64));
+        let proxies = Arc::new(ThumbnailCache::new(Some(tmp.path().join("proxies")), 64));
+        let mut setup = setup(tmp.path(), folders.clone(), cache.clone());
+        setup.settings.loading_mode = crate::model::LoadingMode::Aggressive;
+        setup.settings.first_views_for_all = true;
+        setup.proxies = Some(proxies.clone());
+        let handle = Handle::start(
+            setup,
+            Box::new(DirectorySource::with_settle(
+                &folders,
+                Duration::from_millis(200),
+            )),
+        )
+        .unwrap();
+        let s = wait_for(&handle.status, "first pass", |s| {
+            s.state == "watching" && s.thumbnails == 2
+        });
+        // The small image needs none.
+        assert_eq!(s.first_views, 1);
+        // The thumbnail cache counts as full from now on; first views go on.
+        cache.core_budget_for_test(1);
+        large(&root.join("new.png"), 3);
+        let s = wait_for(&handle.status, "live file", |s| s.first_views == 2);
+        assert!(s.cache_full || s.thumbnails == 3);
+        handle.stop();
+        proxies.flush();
+        let token = proxies.token(&root.join("new.png"), crate::thumbnail_cache::Kind::Proxy);
+        assert!(proxies.contains(&token.unwrap()));
     }
 
     #[test]

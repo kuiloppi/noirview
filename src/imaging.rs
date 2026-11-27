@@ -153,7 +153,7 @@ pub fn generate_thumbnail(
     path: &std::path::Path,
     settings: &Settings,
 ) -> crate::pregen::Outcome {
-    generate_cached(cache, None, path, settings)
+    generate_cached(cache, None, path, settings).outcome
 }
 /// The thumbnail, and where `Settings::first_views_for` the path the first
 /// view, of one image, unless the caches have them (one decode for
@@ -163,19 +163,31 @@ pub fn generate_cached(
     proxies: Option<&Arc<ThumbnailCache>>,
     path: &std::path::Path,
     settings: &Settings,
-) -> crate::pregen::Outcome {
-    use crate::pregen::Outcome;
+) -> crate::pregen::Step {
+    use crate::pregen::{FirstView, Outcome, Step};
     let Some(token) = cache.token(path, Kind::Thumbnail) else {
-        return Outcome::Failed;
+        return Outcome::Failed.into();
     };
-    let proxy = proxies
-        .filter(|_| settings.first_views_for(path))
-        .filter(|p| p.has_room())
-        .and_then(|p| {
-            p.token(path, Kind::Proxy)
-                .filter(|t| !p.contains(t))
-                .map(|t| (p.clone(), t))
-        });
+    let mut first_view = FirstView::NotWanted;
+    let mut proxy = None;
+    if let Some(p) = proxies.filter(|_| settings.first_views_for(path)) {
+        if let Some(t) = p.token(path, Kind::Proxy) {
+            first_view = if p.contains(&t) {
+                FirstView::Present
+            } else if cache
+                .source_size(&token)
+                .is_some_and(|size| !wants_proxy(size, settings.proxy_min_side, true))
+            {
+                // Known from its thumbnail: small enough to need none.
+                FirstView::Small
+            } else if !p.has_room() {
+                FirstView::Missing
+            } else {
+                proxy = Some((p.clone(), t));
+                FirstView::Missing
+            };
+        }
+    }
     if let Some((proxies, proxy_token)) = proxy {
         // One full decode for the first view and, if missing, the thumbnail.
         let request = Request {
@@ -194,24 +206,38 @@ pub fn generate_cached(
         return match decode_image(&request, &no_ai, None) {
             Ok(decoded) => {
                 let thumbnail = (!cache.contains(&token)).then(|| (cache.clone(), token));
-                store_reduced(
+                let made = store_reduced(
                     &decoded.image,
                     thumbnail,
                     Some((proxies, proxy_token)),
                     settings.proxy_min_side,
                     true,
                 );
-                Outcome::Generated
+                Step {
+                    outcome: Outcome::Generated,
+                    first_view: if made {
+                        FirstView::Made
+                    } else {
+                        FirstView::Small
+                    },
+                }
             }
-            Err(_) => Outcome::Failed,
+            Err(_) => Step {
+                outcome: Outcome::Failed,
+                first_view,
+            },
         };
     }
+    let step = |outcome| Step {
+        outcome,
+        first_view,
+    };
     if cache.contains(&token) {
-        return Outcome::Cached;
+        return step(Outcome::Cached);
     }
     // Leave headroom so a pass never evicts its own earlier tiles.
-    if cache.stats().bytes >= cache.budget() / 10 * 9 {
-        return Outcome::Full;
+    if !cache.has_room() {
+        return step(Outcome::Full);
     }
     let request = Request {
         key: Key {
@@ -229,9 +255,9 @@ pub fn generate_cached(
     match decode(&request, &no_ai, None) {
         Ok((pixels, dimensions, _)) => {
             cache.store(token, &pixels, dimensions);
-            Outcome::Generated
+            step(Outcome::Generated)
         }
-        Err(_) => Outcome::Failed,
+        Err(_) => step(Outcome::Failed),
     }
 }
 impl Images {
@@ -829,7 +855,7 @@ fn store_reduced(
     proxy: Option<(Arc<ThumbnailCache>, crate::thumbnail_cache::Token)>,
     min_side: u32,
     for_all: bool,
-) {
+) -> bool {
     let dimensions = [image.width(), image.height()];
     let reduce = |cap: u32| {
         let size = crate::resize::fit(dimensions, cap);
@@ -840,11 +866,13 @@ fn store_reduced(
         }
         .map(DynamicImage::into_rgba8)
     };
+    let mut made = false;
     if let Some((cache, token)) = proxy.filter(|_| wants_proxy(dimensions, min_side, for_all)) {
         if let Ok(pixels) = reduce(crate::thumbnail_cache::PROXY_SIDE) {
             // Prefetch decodes several large images at once; each proxy is
             // ~15 MiB of pixels until the cache writer has encoded it.
             cache.store_when_room(token, &pixels, dimensions, Duration::from_secs(3));
+            made = true;
         }
     }
     if let Some((cache, token)) = thumbnail {
@@ -852,6 +880,7 @@ fn store_reduced(
             cache.store(token, &pixels, dimensions);
         }
     }
+    made
 }
 /// Reduced copies of a just-decoded full image for the disk caches: the
 /// thumbnail (so the grid and the next preview need no second decode) and,
@@ -883,7 +912,7 @@ fn harvest(
         r.settings.first_views_for(&r.key.path),
     );
     Some(Box::new(move |image: &DynamicImage| {
-        store_reduced(image, thumbnail, proxy, min_side, for_all)
+        store_reduced(image, thumbnail, proxy, min_side, for_all);
     }))
 }
 fn decode_cached(
@@ -1377,10 +1406,11 @@ mod tests {
             loading_mode: crate::model::LoadingMode::Aggressive,
             ..Settings::default()
         };
+        use crate::pregen::{FirstView, Outcome, Step};
         // Off: the thumbnail only (the image is below the first-view size).
         assert_eq!(
             generate_cached(&cache, Some(&proxies), &path, &settings),
-            crate::pregen::Outcome::Generated
+            Outcome::Generated.into()
         );
         wait_writes(&cache, 1);
         assert_eq!(proxies.stats().writes, 0);
@@ -1388,7 +1418,10 @@ mod tests {
         settings.first_views_for_all = true;
         assert_eq!(
             generate_cached(&cache, Some(&proxies), &path, &settings),
-            crate::pregen::Outcome::Generated
+            Step {
+                outcome: Outcome::Generated,
+                first_view: FirstView::Made
+            }
         );
         wait_writes(&proxies, 1);
         let token = proxies.token(&path, Kind::Proxy).unwrap();
@@ -1396,8 +1429,32 @@ mod tests {
         assert_eq!(cache.stats().writes, 1, "the thumbnail was not made again");
         assert_eq!(
             generate_cached(&cache, Some(&proxies), &path, &settings),
-            crate::pregen::Outcome::Cached
+            Step {
+                outcome: Outcome::Cached,
+                first_view: FirstView::Present
+            }
         );
+        // A small image is known from its thumbnail and not decoded again.
+        let tiny = dir.path().join("tiny.png");
+        image::RgbImage::from_pixel(400, 300, image::Rgb([1, 2, 3]))
+            .save(&tiny)
+            .unwrap();
+        assert_eq!(
+            generate_cached(&cache, Some(&proxies), &tiny, &settings),
+            Step {
+                outcome: Outcome::Generated,
+                first_view: FirstView::Small
+            }
+        );
+        wait_writes(&cache, 2);
+        assert_eq!(
+            generate_cached(&cache, Some(&proxies), &tiny, &settings),
+            Step {
+                outcome: Outcome::Cached,
+                first_view: FirstView::Small
+            }
+        );
+        assert_eq!(proxies.stats().writes, 1);
     }
     #[test]
     fn aggressive_mode_keeps_a_screen_sized_first_view_of_a_large_image() {
