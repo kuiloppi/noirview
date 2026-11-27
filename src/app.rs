@@ -807,6 +807,8 @@ type PregenKey = (
     Option<PathBuf>,
     crate::model::LoadingMode,
     usize,
+    bool,
+    usize,
 );
 #[derive(Clone, Copy)]
 enum TagAction {
@@ -1949,6 +1951,7 @@ pub struct Viewer {
     fast_browsing: bool,
     /// This frame had input (smaller work slices, `view_build::slice`).
     frame_input: bool,
+    window_focused: bool,
     files: Vec<PathBuf>,
     visible: VisibleFiles,
     current: Option<PathBuf>,
@@ -2286,6 +2289,7 @@ impl Viewer {
             recent_steps: Default::default(),
             fast_browsing: false,
             frame_input: false,
+            window_focused: true,
             files: vec![],
             visible: VisibleFiles::default(),
             current: None,
@@ -7526,6 +7530,11 @@ impl Viewer {
                 } else {
                     " (paused)"
                 };
+                let what = if self.lib.settings.first_views_for_all {
+                    "first views"
+                } else {
+                    "thumbnails"
+                };
                 let (text, widest) = if compact {
                     (
                         format!("· cache {}%{paused}", p.done * 100 / p.total.max(1)),
@@ -7533,8 +7542,8 @@ impl Viewer {
                     )
                 } else {
                     (
-                        format!("· caching thumbnails {} / {}{paused}", p.done, p.total),
-                        format!("· caching thumbnails {} / {}{paused}", p.total, p.total),
+                        format!("· caching {what} {} / {}{paused}", p.done, p.total),
+                        format!("· caching {what} {} / {}{paused}", p.total, p.total),
                     )
                 };
                 fixed_label(ui, text, widest)
@@ -9663,6 +9672,7 @@ impl Viewer {
             SETTINGS_PROFILES => self.profile_page(ui),
             _ => {}
         }
+        let pregen_pause = self.pregen_pause();
         let s = &mut self.lib.settings;
         let h = &mut self.hover;
         match page {
@@ -10957,12 +10967,12 @@ impl Viewer {
                     h.check(
                         ui,
                         &mut s.cache_while_active,
-                        "Keep caching thumbnails while I use NoirView",
+                        "Keep caching thumbnails and first views while I use NoirView",
                     );
                     h.check(
                         ui,
                         &mut s.cache_when_unfocused,
-                        "Keep caching thumbnails when the window is not active",
+                        "Keep caching thumbnails and first views when the window is not active",
                     );
                     h.slider(
                         ui,
@@ -11026,8 +11036,12 @@ impl Viewer {
                                 p.done, p.total
                             )
                         } else {
+                            let pause = match pregen_pause {
+                                Some(why) if p.done < p.total => format!(" · paused: {why}"),
+                                _ => String::new(),
+                            };
                             format!(
-                                "Pre-generated: {} / {} images ({} new this pass)",
+                                "Pre-generated: {} / {} images ({} new this pass){pause}",
                                 p.done, p.total, p.generated
                             )
                         },
@@ -12597,6 +12611,22 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
     /// Restart the background thumbnail pass when the image list or its
     /// settings change. Order: from the current page / image to the end, then
     /// the beginning.
+    /// Why the background pass is waiting now, if it is.
+    fn pregen_pause(&self) -> Option<&'static str> {
+        if crate::pregen::quiet() {
+            return None;
+        }
+        let s = &self.lib.settings;
+        Some(if self.index_progress.is_some() {
+            "keywords are being indexed"
+        } else if self.memory_tight() {
+            "memory is low"
+        } else if !self.window_focused && !s.cache_when_unfocused {
+            "the window is not active"
+        } else {
+            "you are using NoirView (it continues 2 s after the last input)"
+        })
+    }
     fn sync_pregen(&mut self) {
         let s = &self.lib.settings;
         let key = (
@@ -12605,6 +12635,9 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             self.visible.last().cloned(),
             s.loading_mode,
             s.thumbnail_cache_mb,
+            // A pass that already covered the folder runs again for first views.
+            s.first_views_for_all,
+            s.proxy_cache_mb,
         );
         if self.pregen_key.as_ref() == Some(&key) {
             return;
@@ -12984,6 +13017,7 @@ fn order_controls(ui: &mut egui::Ui, h: &mut Hover, order: &mut Order, id: &str)
 impl eframe::App for Viewer {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.frame_input = !raw.events.is_empty();
+        self.window_focused = raw.focused;
         // Unit tests drive these process-wide gates themselves.
         if !cfg!(test) {
             let s = &self.lib.settings;
@@ -13327,6 +13361,22 @@ mod tests {
         let mut viewer = Viewer::bootstrap(ctx.clone(), "test GPU".into(), None, startup);
         viewer.startup = None;
         viewer
+    }
+    #[test]
+    fn turning_on_first_views_restarts_the_background_pass() {
+        let ctx = egui::Context::default();
+        let mut v = viewer(&ctx);
+        v.sync_pregen();
+        let before = v.pregen_key.clone();
+        v.sync_pregen();
+        assert_eq!(v.pregen_key, before);
+        v.lib.settings.first_views_for_all = true;
+        v.sync_pregen();
+        assert_ne!(v.pregen_key, before);
+        let on = v.pregen_key.clone();
+        v.lib.settings.proxy_cache_mb += 1024;
+        v.sync_pregen();
+        assert_ne!(v.pregen_key, on);
     }
     #[test]
     fn browsing_fast_needs_four_changes_a_second_and_no_pause() {
