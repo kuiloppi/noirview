@@ -236,6 +236,7 @@ const SETTINGS_RESET: [&[&str]; 12] = [
         "first_view_folders",
         "proxy_cache_unlimited",
         "proxy_keep_free_gb",
+        "notify_read_failures",
         "prefetch_ahead",
         "prefetch_behind",
         "thumbnail_cache_mb",
@@ -831,10 +832,7 @@ type PregenKey = (
     Option<PathBuf>,
     Option<PathBuf>,
     crate::model::LoadingMode,
-    usize,
     u64,
-    usize,
-    u32,
 );
 #[derive(Clone, Copy)]
 enum TagAction {
@@ -2152,6 +2150,13 @@ pub struct Viewer {
     grid_area: Option<crate::grid_layout::Area>,
     /// What the background thumbnail pass was last started for.
     pregen_key: Option<PregenKey>,
+    /// The cache sizes the pass last saw, and when they last changed.
+    pregen_budgets: Option<(usize, usize, u32)>,
+    pregen_budget_changed: Option<Instant>,
+    /// Read failures already told about (`failures`), and when.
+    failure_serial: u64,
+    failure_counts: [u64; 4],
+    failure_notice_at: Option<Instant>,
     /// Cache folder setting this session's thumbnail cache was opened with.
     cache_dir_in_use: PathBuf,
     /// Grid Normal mode: a click opens the image instead of selecting it.
@@ -2428,6 +2433,11 @@ impl Viewer {
             grid_start: 0,
             grid_area: None,
             pregen_key: None,
+            pregen_budgets: None,
+            pregen_budget_changed: None,
+            failure_serial: 0,
+            failure_counts: [0; 4],
+            failure_notice_at: None,
             cache_dir_in_use: PathBuf::new(),
             grid_normal: false,
             tag_mode_paused: false,
@@ -2827,6 +2837,24 @@ impl Viewer {
                     }
                 }
                 Update::Warning(message) => self.notify(message),
+                Update::FolderGone(path) => {
+                    // Nothing left to show: the list empties, the reason is said once.
+                    self.loading = false;
+                    self.index_progress = None;
+                    self.retire.retire((
+                        std::mem::take(&mut self.files),
+                        std::mem::take(&mut self.folder_paths),
+                    ));
+                    self.delete_selection.clear();
+                    self.tag_selection.clear();
+                    self.move_selection.clear();
+                    self.rebuild();
+                    self.changed();
+                    self.dialog = Some(Dialog::Error(format!(
+                        "The open folder was removed or renamed:\n{}\n\nIts images are no longer shown. Open another folder to continue.",
+                        path.display()
+                    )));
+                }
                 Update::Error(message) => {
                     self.loading = false;
                     self.index_progress = None;
@@ -9438,6 +9466,10 @@ impl Viewer {
                 "check_index" => self.check_index(),
                 "usn_install" | "usn_remove" | "usn_test" => self.usn_action(action),
                 "usn_refresh" => self.usn_refresh(),
+                "clear_failures" => {
+                    crate::failures::clear();
+                    self.failure_counts = [0; 4];
+                }
                 "watch_check" => {
                     if let Some(handle) = &self.watch.handle {
                         handle.check_now();
@@ -9725,6 +9757,10 @@ impl Viewer {
             _ => {}
         }
         let pregen_pause = self.pregen_pause();
+        let first_views_here = self
+            .visible
+            .first()
+            .is_some_and(|path| self.lib.settings.first_views_for(path));
         let s = &mut self.lib.settings;
         let h = &mut self.hover;
         match page {
@@ -11073,10 +11109,26 @@ impl Viewer {
                                 h.check(ui, &mut s.first_views_selected, "In these folders:");
                                 let mut remove = None;
                                 for (i, folder) in s.first_view_folders.iter().enumerate() {
+                                    // Watched: new images are prepared in the
+                                    // background too; otherwise while it is open.
+                                    let watched = s.watch_folders
+                                        && s.watched_folders.iter().any(|w| {
+                                            crate::model::path_under(folder, &w.path)
+                                                && (w.subfolders
+                                                    || crate::model::path_under(&w.path, folder))
+                                        });
+                                    let when = if watched {
+                                        "watched: also in the background"
+                                    } else {
+                                        "while it is open (not watched)"
+                                    };
                                     ui.horizontal(|ui| {
                                         ui.add(
-                                            egui::Label::new(folder.display().to_string())
-                                                .truncate(),
+                                            egui::Label::new(format!(
+                                                "{} · {when}",
+                                                folder.display()
+                                            ))
+                                            .truncate(),
                                         );
                                         if h.button(ui, "Remove", false, true, false) {
                                             remove = Some(i);
@@ -11151,6 +11203,44 @@ impl Viewer {
                 h.slider(ui, &mut s.prefetch_ahead, 0..=32, "Prefetch ahead");
                 h.slider(ui, &mut s.prefetch_behind, 0..=32, "Prefetch behind");
                 h.note(ui, "Maximum images in and against the browsing direction. Memory limits may reduce these counts. Zero disables that side.");
+                h.section(ui, "Unreadable images");
+                h.check(
+                    ui,
+                    &mut s.notify_read_failures,
+                    "Tell me when thumbnails, first views, keywords or images cannot be read",
+                );
+                let (counts, recent) = crate::failures::snapshot();
+                if counts.iter().sum::<u64>() == 0 {
+                    h.note(ui, "Nothing unreadable since NoirView started.");
+                } else {
+                    h.note(
+                        ui,
+                        RichText::new(format!(
+                            "Could not be read since NoirView started: {}",
+                            crate::failures::describe(counts)
+                        ))
+                        .color(RED),
+                    );
+                    for failure in recent.iter().take(12) {
+                        h.note(
+                            ui,
+                            RichText::new(format!(
+                                "{} · {}: {}",
+                                failure.path.display(),
+                                failure.what.label(),
+                                failure.reason
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                    }
+                    if recent.len() > 12 {
+                        h.note(ui, format!("… and {} more", recent.len() - 12));
+                    }
+                    if h.button(ui, "Clear the list", false, true, false) {
+                        actions.push("clear_failures");
+                    }
+                }
                 h.section(ui, "Thumbnail cache");
                 h.number(
                     ui,
@@ -11182,7 +11272,12 @@ impl Viewer {
                         },
                     );
                     let wanted = p.first_views + p.first_views_missing;
-                    if s.first_views_for_all && wanted + p.small > 0 {
+                    if s.first_views_for_all && !first_views_here && wanted + p.small == 0 {
+                        h.note(
+                            ui,
+                            "This folder: first views are not prepared here (it is not among the folders chosen above)",
+                        );
+                    } else if s.first_views_for_all && wanted + p.small > 0 {
                         let mut parts = vec![format!("{} made now", p.first_views_made)];
                         if p.small > 0 {
                             parts.push(format!("{} small enough to need none", p.small));
@@ -12808,12 +12903,39 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             self.visible.first().cloned(),
             self.visible.last().cloned(),
             s.loading_mode,
-            s.thumbnail_cache_mb,
             // A pass that already covered the folder runs again for first views.
             s.first_view_scope_key(),
+        );
+        // A cache size change restarts the pass only where it stopped short
+        // (a full cache, first views not made), once the value has settled.
+        let budgets = (
+            s.thumbnail_cache_mb,
             s.proxy_budget_mb(),
             s.proxy_keep_free_gb,
         );
+        if self.pregen_budgets != Some(budgets) {
+            if self.pregen_budgets.is_some() {
+                self.pregen_budget_changed = Some(Instant::now());
+            }
+            self.pregen_budgets = Some(budgets);
+        }
+        if self
+            .pregen_budget_changed
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(1))
+        {
+            self.pregen_budget_changed = None;
+            let stopped_short = self
+                .images
+                .pregen_progress()
+                .is_none_or(|p| p.full || p.first_views_missing > 0);
+            if stopped_short {
+                self.pregen_key = None;
+            }
+        } else if self.pregen_budget_changed.is_some() {
+            self.tx
+                .ctx
+                .request_repaint_after(Duration::from_millis(250));
+        }
         if self.pregen_key.as_ref() == Some(&key) {
             return;
         }
@@ -12834,7 +12956,37 @@ ui.label("Animated GIFs play in the single image view and in the big image from 
             .collect();
         self.images.pregenerate(paths, &self.lib.settings);
     }
+    /// A notice for images that could not be read since the last one (at
+    /// most every 10 s, so a removed folder does not flood the screen).
+    fn failure_notice(&mut self) {
+        let serial = crate::failures::serial();
+        if serial == self.failure_serial {
+            return;
+        }
+        if self
+            .failure_notice_at
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+        {
+            self.tx.ctx.request_repaint_after(Duration::from_secs(1));
+            return;
+        }
+        self.failure_serial = serial;
+        let (counts, _) = crate::failures::snapshot();
+        let mut new = [0; 4];
+        for (i, n) in counts.iter().enumerate() {
+            new[i] = n.saturating_sub(self.failure_counts[i]);
+        }
+        self.failure_counts = counts;
+        if self.lib.settings.notify_read_failures && new.iter().sum::<u64>() > 0 {
+            self.failure_notice_at = Some(Instant::now());
+            self.notify(format!(
+                "Could not read {}. Details: Settings → Performance → Unreadable images.",
+                crate::failures::describe(new)
+            ));
+        }
+    }
     fn image_demand(&mut self, ctx: &egui::Context) -> HashSet<crate::imaging::Key> {
+        self.failure_notice();
         self.sync_history_limit();
         self.memory_check();
         self.images
@@ -13548,10 +13700,11 @@ mod tests {
         v.lib.settings.first_views_for_all = true;
         v.sync_pregen();
         assert_ne!(v.pregen_key, before);
+        // A size change while the pass is not short of room changes nothing.
         let on = v.pregen_key.clone();
         v.lib.settings.proxy_cache_mb += 1024;
         v.sync_pregen();
-        assert_ne!(v.pregen_key, on);
+        assert_eq!(v.pregen_key, on);
     }
     #[test]
     fn browsing_fast_needs_four_changes_a_second_and_no_pause() {

@@ -11,6 +11,7 @@ mod comfy;
 mod decode_stats;
 mod dialog_place;
 mod disk;
+mod failures;
 mod folder;
 mod gesture;
 mod grid_layout;

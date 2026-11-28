@@ -365,6 +365,8 @@ pub struct Settings {
     /// (`proxy_keep_free_gb`) stops it.
     pub proxy_cache_unlimited: bool,
     pub proxy_keep_free_gb: u32,
+    /// A notice when thumbnails, first views, keywords or images cannot be read.
+    pub notify_read_failures: bool,
     pub diagnostic_log: bool,
     /// Draws the window's edges, a point grid and the pointer as egui sees
     /// them, with window / surface sizes; logs changes to
@@ -754,6 +756,7 @@ impl Default for Settings {
             first_view_folders: Vec::new(),
             proxy_cache_unlimited: false,
             proxy_keep_free_gb: 20,
+            notify_read_failures: true,
             diagnostic_log: false,
             window_diagnostics: false,
             grid_start_mode: GridStartMode::Selection,

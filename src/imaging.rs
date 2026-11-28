@@ -222,10 +222,13 @@ pub fn generate_cached(
                     },
                 }
             }
-            Err(_) => Step {
-                outcome: Outcome::Failed,
-                first_view,
-            },
+            Err(e) => {
+                crate::failures::record(crate::failures::What::FirstView, path, format!("{e:#}"));
+                Step {
+                    outcome: Outcome::Failed,
+                    first_view,
+                }
+            }
         };
     }
     let step = |outcome| Step {
@@ -257,7 +260,10 @@ pub fn generate_cached(
             cache.store(token, &pixels, dimensions);
             step(Outcome::Generated)
         }
-        Err(_) => step(Outcome::Failed),
+        Err(e) => {
+            crate::failures::record(crate::failures::What::Thumbnail, path, format!("{e:#}"));
+            step(Outcome::Failed)
+        }
     }
 }
 impl Images {
@@ -658,7 +664,14 @@ impl Images {
                         // that found none usually stores one, and the queue
                         // already asks only once per visit.
                         if !loaded.request.key.preview {
-                            self.failures.insert(loaded.request.key.clone(), error);
+                            let key = &loaded.request.key;
+                            let what = if key.thumb {
+                                crate::failures::What::Thumbnail
+                            } else {
+                                crate::failures::What::Image
+                            };
+                            crate::failures::record(what, &key.path, &error);
+                            self.failures.insert(key.clone(), error);
                         }
                     }
                 }

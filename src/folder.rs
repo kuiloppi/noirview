@@ -77,6 +77,8 @@ pub enum Update {
     Complete(Progress),
     Warning(String),
     Error(String),
+    /// The open folder was removed or renamed (moved to the Recycle Bin, too).
+    FolderGone(PathBuf),
 }
 #[derive(Default)]
 struct RevisionState {
@@ -224,6 +226,8 @@ impl Drop for FolderLoader {
     }
 }
 
+/// How often an idle folder pass checks that the folder still exists.
+const FOLDER_CHECK: Duration = Duration::from_secs(2);
 fn relevant(event: &notify::Event) -> bool {
     if event.need_rescan() {
         return true;
@@ -462,6 +466,10 @@ fn run(
                             }
                         }
                     }
+                    Err(_) if !folder.exists() => {
+                        send(Update::FolderGone(folder.clone()));
+                        return;
+                    }
                     Err(e) => {
                         send(Update::Warning(format!("Folder refresh: {e:#}")));
                     }
@@ -556,8 +564,17 @@ fn run(
             }
             indexing = false;
         }
-        if changes.signal.recv().is_err() {
-            return;
+        // A folder moved to the Recycle Bin keeps its watch and reports
+        // nothing: its absence is checked while waiting.
+        match changes.signal.recv_timeout(FOLDER_CHECK) {
+            Ok(_) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !folder.exists() {
+                    send(Update::FolderGone(folder.clone()));
+                    return;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -707,8 +724,9 @@ fn index_one(
             revision,
             generation,
         }),
-        Err(_) => {
+        Err(e) => {
             progress.failed += 1;
+            crate::failures::record(crate::failures::What::Keywords, path, format!("{e:#}"));
             None
         }
         _ => None,
@@ -1521,6 +1539,33 @@ mod tests {
             vec![fresh]
         ));
         assert!(!lib.photos.contains_key(&path));
+    }
+    #[test]
+    fn a_removed_open_folder_is_reported() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("photos");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.bmp"), []).unwrap();
+        let mut loader = FolderLoader::new(|| {});
+        loader.start(dir.clone(), false, None, false);
+        while !matches!(
+            loader.rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Update::Complete(_)
+        ) {}
+        // Moved away (as to the Recycle Bin): no event names the folder itself.
+        fs::rename(&dir, parent.path().join("elsewhere")).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "no FolderGone");
+            match loader.rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Update::FolderGone(path)) => {
+                    assert_eq!(path, dir);
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
     #[test]
     fn switching_folders_discards_the_old_index_stream() {

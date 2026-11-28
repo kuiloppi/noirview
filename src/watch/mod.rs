@@ -86,6 +86,8 @@ pub struct Status {
     pub thumbnails: u64,
     pub keywords: u64,
     pub first_views: u64,
+    /// New or changed files reported live by the change source.
+    pub noticed: u64,
     /// First views wanted but not made (no room in their cache).
     pub first_views_missing: u64,
     pub failed: u64,
@@ -112,6 +114,7 @@ impl Status {
             self.first_views,
             self.keywords
         );
+        text.push_str(&format!(" · new or changed files noticed {}", self.noticed));
         if self.first_views_missing > 0 {
             text.push_str(&format!(
                 " · {} first views not made (first-view cache full)",
@@ -364,7 +367,14 @@ impl Engine {
                         self.update(|s| s.keywords += 1);
                     }
                 }
-                Err(_) => failed = true,
+                Err(e) => {
+                    crate::failures::record(
+                        crate::failures::What::Keywords,
+                        path,
+                        format!("{e:#}"),
+                    );
+                    failed = true;
+                }
             }
         }
         // A full cache makes nothing new, but each image is still asked:
@@ -474,6 +484,9 @@ impl Engine {
                 break;
             }
             for change in self.source.take_live() {
+                if matches!(change, Change::File { .. }) {
+                    self.update(|s| s.noticed += 1);
+                }
                 self.accept(change);
             }
             if self.check_now.swap(false, Ordering::Relaxed) {
@@ -715,9 +728,10 @@ mod tests {
         assert_eq!(index.load(&root, true).unwrap().len(), 4);
         // A new image is picked up live.
         jpeg(&root.join("new.jpg"), 10);
-        wait_for(&handle.status, "live file", |s| {
+        let s = wait_for(&handle.status, "live file", |s| {
             s.thumbnails == 5 && s.keywords == 5
         });
+        assert!(s.noticed >= 1);
         handle.stop();
         cache.flush();
         // A restart lists only the folder that got the live file (`sub` is
